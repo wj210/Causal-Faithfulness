@@ -8,17 +8,16 @@ else
   echo "cuda_visible_devices.txt file not found."
 fi
 
-bs=24
+bs=32
 num_samples=100
 corrupted_samples=5
 expl_type='cot'
 model_name='gemma-2B-chat'
 metric=causal
 faithfulness_type=input_output_p
-dataset_name='arc'
+dataset_name='csqa'
 
-
-for expl_type in cot
+for expl_type in cot post_hoc
 do
   for seed in 0 1 2
   do
@@ -41,8 +40,8 @@ do
   --model_name $model_name \
   --metric $metric \
   --faithfulness_type $faithfulness_type \
-
-  ## cc shap
+  
+  # cc shap
   python main.py \
   --dataset_name $dataset_name \
   --num_samples $num_samples \
@@ -52,5 +51,5 @@ do
   --model_name $model_name \
   --metric cc_shap \
   --faithfulness_type $faithfulness_type \
-
+  
 done

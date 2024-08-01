@@ -228,81 +228,95 @@ def compute_causal_values(ds,mt,choice_key,use_fs,edit_type,noise_level,args):
     expl_store = {}
     ds = TorchDS(ds,mt.tokenizer,choice_key,args.model_name,use_fs = use_fs,ds_name = args.dataset_name, expl = None if args.expl_type == 'post_hoc' else args.expl_type,corrupt = True,ds_type = edit_type)
     t = time()
-    for sample in tqdm(dstotal = len(ds),desc = 'Getting attributions'):
+    subject_key = 'question' if edit_type == 'original' else f'{edit_type}_question'
+    for sample in tqdm(ds,total = len(ds),desc = 'Getting attributions'):
         sample_id = sample['sample_id']
-        prompt = sample['input_ids']
         answer = sample['answer']
-        # subject = sample['subject']
-        subject = ds.ds[sample_id]['question']
-        result = calculate_hidden_flow( # differences not yet deduct low score (dont do tracing at tokens before the subject) - no use.
-                    mt,
-                    prompt,
-                    subject,
-                    samples = args.corrupted_samples,
-                    answer=answer,
-                    kind=None,
-                    noise=noise_level,
-                    uniform_noise=False,
-                    replace=args.replace,
-                    input_until = "\n\nPick the right choice as the answer.",
-                    batch_size = args.batch_size,
-                    # scores = {'low_score':ds.ds[sample_id]['low_score'],'high_score':ds.ds[sample_id]['high_score']},
-                    use_fs = use_fs
-                )
-        numpy_result = {
-            k: v.detach().cpu().numpy() if torch.is_tensor(v) else v
-            for k, v in result.items()
-        }
+        subject = ds.ds[sample_id][subject_key]
+        if args.expl_type == 'post_hoc':
+            prompt = sample['input_ids']
+            result = calculate_hidden_flow(
+                        mt,
+                        prompt,
+                        subject,
+                        samples = args.corrupted_samples,
+                        answer=answer,
+                        kind=None,
+                        noise=noise_level,
+                        uniform_noise=False,
+                        replace=args.replace,
+                        input_until = "\n\nPick the right choice as the answer.",
+                        batch_size = args.batch_size,
+                        scores = {'low_score':ds.ds[sample_id]['low_score'],'high_score':ds.ds[sample_id]['high_score']},
+                        use_fs = use_fs
+                    )
+            numpy_result = {
+                k: v.detach().cpu().numpy() if torch.is_tensor(v) else v
+                for k, v in result.items()
+            }
 
-        # Explanation causal tracing
-        # form the explanation prompt
-        if edit_type == 'original':
-            question_key = 'question'
-        else:
-            question_key = f'{edit_type}_question'
-        ques,choices = ds.ds[sample_id][question_key],join_choices(ds.ds[sample_id]['choices'])
-        expl_prompt = format_mcq(ques,choices,answer = answer if args.expl_type == 'post_hoc' else None,expl_=args.expl_type,is_chat=ds.is_chat)
-        if ds.is_chat:
-            expl_prompt = format_input(expl_prompt,mt.tokenizer,fs = ds.fs)
-            if args.expl_type == 'post_hoc':
-                expl_prompt += 'Because'
-            else:
-                expl_prompt += "Let's think step by step: "
-        else:
-            expl_prompt = ds.fs + expl_prompt
-            if args.expl_type == 'post_hoc':
-                expl_prompt += '\nBecause'
-            else:
-                expl_prompt += "\nLet's think step by step: "
+            expl_prompt = ds.ds[sample_id]['explanation_prompt']
+            expls = ds.ds[sample_id]['explanation']
+            if expls.strip() == '':
+                continue
+            expl_result = calculate_hidden_flow( # differences not yet deduct low score (dont do tracing at tokens before the subject) - no use.
+                        mt,
+                        expl_prompt,
+                        subject,
+                        samples = args.corrupted_samples,
+                        kind=None,
+                        noise=noise_level,
+                        uniform_noise=False,
+                        replace=args.replace,
+                        answer = expls,
+                        input_until = numpy_result['scores'].shape[0], # for post_hoc see dependence on answer
+                        batch_size = args.batch_size,
+                        use_fs = use_fs
+                    )
+            if expl_result is None:
+                continue
+            numpy_expl_result = {
+                k: v.detach().cpu().numpy() if torch.is_tensor(v) else v
+                for k, v in expl_result.items()
+            }
 
-        expls = ds.ds[sample_id]['explanation']
-        if expls.strip() == '':
-            continue
+        else: # if cot, generate both expl and ans 1-shot
+            prompt = ds.ds[sample_id]['explanation_prompt']
+            cot_answer = ds.ds[sample_id]['explanation'] + f" The best answer is ({answer}"
+            cot_result = calculate_hidden_flow(
+                        mt,
+                        prompt,
+                        subject,
+                        samples = args.corrupted_samples,
+                        answer=cot_answer,
+                        kind=None,
+                        noise=noise_level,
+                        uniform_noise=False,
+                        replace=args.replace,
+                        input_until = "\n\nPick the right choice as the answer.",
+                        batch_size = args.batch_size,
+                        use_fs = use_fs,
+                        average_sequence = False # impt to set
+                    )
+            if cot_result is not None:
+                cot_result = {
+                k: v.detach().cpu().numpy() if torch.is_tensor(v) else v
+                for k, v in cot_result.items()
+            }
+            # split the expl and ans scores
+            encoded_cot_answer = mt.tokenizer.encode(cot_answer)
+            cot_expl_end,_ = find_token_range(mt.tokenizer, encoded_cot_answer, ' The best answer is',find_sub_range = False)
+            numpy_result,numpy_expl_result = deepcopy(cot_result),deepcopy(cot_result)
+            for score_k in ['low_score','high_score']:
+                numpy_result[score_k] = cot_result[score_k][-1]
+                numpy_expl_result[score_k] = cot_result[score_k][:cot_expl_end].mean(-1)
+
+            numpy_result['scores'] = cot_result['scores'][:,:,-1] - numpy_result['low_score']
+            numpy_expl_result['scores'] = cot_result['scores'][:,:,:cot_expl_end].mean(-1) - numpy_expl_result['low_score']
 
         output_store[sample_id] = numpy_result
-        expl_result = calculate_hidden_flow( # differences not yet deduct low score (dont do tracing at tokens before the subject) - no use.
-                    mt,
-                    expl_prompt,
-                    subject,
-                    samples = args.corrupted_samples,
-                    kind=None,
-                    noise=noise_level,
-                    uniform_noise=False,
-                    replace=args.replace,
-                    answer = expls,
-                    input_until = numpy_result['scores'].shape[0], # for post_hoc see dependence on answer
-                    batch_size = args.batch_size,
-                    use_fs = use_fs
-                )
-        if expl_result is None:
-            continue
-        numpy_expl_result = {
-            k: v.detach().cpu().numpy() if torch.is_tensor(v) else v
-            for k, v in expl_result.items()
-        }
-        # expl_store[sample_id].append(numpy_expl_result)
         expl_store[sample_id] = numpy_expl_result
-    
+
     total_time_taken = time() - t
     print (f'Total time taken for {args.model_name} - {edit_type}: {total_time_taken/3600:.3f}hr, per sample: {total_time_taken/len(output_store):.3f}s')
 

@@ -332,22 +332,20 @@ def get_known_dataset(ds,mt,batch_size = 8,choice_key =[],model_name = 'llama3',
 
     print (f'{ds_type} dataset, acc score: {sum([d["correct"] for d in known_ds])/len(known_ds):.2f}')
     # compute noise level
-    subject_key = 'subject' if ds_type == 'original' else f'{ds_type}_subject'
 
-    if ds_type != 'cf': # cf no need to collect corrupted score, just the explanation and answer
-        # noise_level = float(args.noise_level[1:]) * collect_embedding_std(mt, [k[subject_key] for k in known_ds if k['correct']])
-        noise_level = 0.03
+    if ds_type != 'cf' or args.expl_type == 'cot': # cf and cot no need to do prior corruption.
+        subject_key = 'question' if ds_type == 'original' else f'{ds_type}_question' 
+        noise_level = float(args.noise_level[1:]) * collect_embedding_std(mt, [k[subject_key] for k in known_ds if k['correct']])
+        
         print (f'Noise level for {ds_type}: {noise_level:.2f}')
         ## Get corrupted run for Output ##
         corrupted_ds = TorchDS(known_ds,mt.tokenizer,choice_key,model_name,use_fs = use_fs,ds_name = args.dataset_name,expl = None if args.expl_type == 'post_hoc' else args.expl_type,corrupt = True,ds_type = ds_type)
         out_ds = []
         for s in tqdm(corrupted_ds.batched_ds,total = len(corrupted_ds),desc = 'Getting corrupted samples'):
             prompt = s['input_ids']
-            subject = s['subject']
             s_id = s['sample_id']
             answer_t = tokenize_single_answer(s['answer'],mt.tokenizer,model_name)
-            # corrupt_range = find_token_range(mt.tokenizer, prompt, subject,find_sub_range=use_fs)
-            corrupt_range = find_token_range(mt.tokenizer, prompt, corrupted_ds.ds[s_id]['question'],find_sub_range=use_fs)
+            corrupt_range = find_token_range(mt.tokenizer, prompt, corrupted_ds.ds[s_id][subject_key],find_sub_range=use_fs)
 
             low_score,_ = trace_with_patch(
                 mt.model, prompt.repeat(1+args.corrupted_samples,1).to(mt.model.device), [], answer_t, corrupt_range, noise=noise_level, uniform_noise=False,past_kv = None ,num_samples = args.corrupted_samples
@@ -360,8 +358,6 @@ def get_known_dataset(ds,mt,batch_size = 8,choice_key =[],model_name = 'llama3',
         out_ds = known_ds
         noise_level = 0.
     
-    print (np.mean([d['difference'] for d in out_ds]))
-    exit()
 
     ## Get explanation for samples with correct answer ## if post_hoc
     if args.expl_type == 'post_hoc':

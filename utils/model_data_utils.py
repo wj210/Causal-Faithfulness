@@ -109,9 +109,9 @@ def load_hf_ds(ds_name,seed=0):
     esnli select if the subject - rationale tokens of the premise is continuous ie 2,3,4 instead of 2,7,8. (there is 3 rationales per example)
     """
     random.seed(42) # we fix the seed here to sample the same samples.
+    choice_key = []
     if ds_name == 'csqa':
         dataset_path = "niurl/eraser_cose"
-        choice_key = []
         ds = load_dataset(dataset_path)
         def map_fn(d):
             d['choices'] = [c.strip() for c in d['choices'].split('[sep]')]
@@ -168,9 +168,7 @@ def load_hf_ds(ds_name,seed=0):
                 acceptable_ds = [json.loads(l) for l in f]
     
         ds = random.sample(acceptable_ds,1000) # to get known_ds
-        choice_key= []
     elif ds_name == 'arc':
-        choice_key = []
         formatted_path = 'data/arc_test.json'
         if not os.path.exists(formatted_path):
             ds = load_dataset('allenai/ai2_arc','ARC-Challenge',split = 'test')
@@ -191,7 +189,33 @@ def load_hf_ds(ds_name,seed=0):
         else:
             with open(formatted_path,'r') as f:
                 ds = [json.loads(l) for l in f]
-            
+    elif ds_name  == 'truthfulqa':
+        formatted_path = 'data/truthfulqa.json'
+        if not os.path.exists(formatted_path):
+            ds = load_dataset("truthfulqa/truthful_qa", "multiple_choice",split = 'validation')
+            formatted_ds =[]
+            for d in ds:
+                choices = d['mc1_targets']['choices']
+                random_ids = list(range(len(choices)))
+                random.shuffle(random_ids) # shuffle choice since answer is always 1st pos
+                choices = [choices[i] for i in random_ids]
+                answer_idx = d['mc1_targets']['labels'].index(1)
+                answer = chr(97+random_ids.index(answer_idx)).upper()
+                dd = {
+                    'question':d['question'],
+                    'choices': choices,
+                    'answer': answer,
+                }
+                formatted_ds.append(dd)
+            ds_w_subject,total_cost = extract_subject_from_questions(formatted_ds)
+            print (f'Total cost for extracting subjects: {total_cost:.2f}')
+            ds = ds_w_subject
+            with open(formatted_path,'w') as f:
+                for d in ds:
+                    f.write(json.dumps(d)+'\n')
+        else:
+            with open(formatted_path,'r') as f:
+                ds = [json.loads(l) for l in f]
     else:
         raise ValueError(f"Dataset {ds_name} not found.")
     random.seed(seed) # seed back to the original seed

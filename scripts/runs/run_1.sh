@@ -12,12 +12,12 @@ bs=32
 num_samples=100
 corrupted_samples=5
 expl_type='cot'
-model_name='llama3-8B'
+model_name='llama3-8B-chat'
 metric=causal
 faithfulness_type=input_output_p
-dataset_name='arc'
+dataset_name='esnli'
 
-for expl_type in post_hoc
+for expl_type in post_hoc cot
 do
   for seed in 0 1 2
   do
@@ -30,6 +30,7 @@ do
     --model_name $model_name \
     --seed $seed
   done
+  
 
   python main.py \
   --dataset_name $dataset_name \
@@ -53,3 +54,4 @@ do
   --faithfulness_type $faithfulness_type \
   
 done
+

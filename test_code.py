@@ -85,7 +85,6 @@ for j,d in tqdm(enumerate(data),total=len(data)):
         # out = m.generate(tokenized_prompt,do_sample=True,max_new_tokens=1,pad_token_id = tokenizer.eos_token_id)
     next_token = out.logits[0, -1].argmax()
     cache_position_next = cache_position[-1:] + 1
-
     print(next_token, repr(tokenizer.decode(next_token.item())))
 
     concatted = torch.cat([tokenized_prompt, next_token.unsqueeze(0).unsqueeze(0)], dim=-1)

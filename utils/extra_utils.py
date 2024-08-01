@@ -200,9 +200,9 @@ def openai_call(message,model,max_tokens,temperature=0.,n=1):
             print(f'Failing Openai call due to {e}, remaining calls: {max_calls - num_calls}')
 
 
-def get_common_samples(paths,type_,max = True):
+def get_common_samples(paths,type_):
     """
-    if max, we only pick samples that are correct and sort according to difference_scores.
+    pick only samples that are correct in all paths
     """
     common_samples = defaultdict(list)
     common_subjects = {}
@@ -212,10 +212,10 @@ def get_common_samples(paths,type_,max = True):
         for d in data:
             if d['sample_id'] not in common_subjects and d['correct']:
                 if type_ == 'original':
-                    common_subjects[d['sample_id']] = d['subject']
+                    common_subjects[d['sample_id']] = d['question']
                 else:
-                    common_subjects[d['sample_id']] = d[f'{type_}_subject']
-            if max and not d['correct']:
+                    common_subjects[d['sample_id']] = d[f'{type_}_question']
+            if not d['correct']:
                 continue
             common_samples[d['sample_id']].append(d['difference'])
             
@@ -223,10 +223,8 @@ def get_common_samples(paths,type_,max = True):
     common_samples = {k:v for k,v in common_samples.items() if len(v) == len(paths)} 
     common_subjects = [v for k,v in common_subjects.items() if k in common_samples] # get the subjects of the common samples to get noise
     averaged_samples = {k:np.mean(v) for k,v in common_samples.items()}
-    if max:
-        sorted_averages = sorted(averaged_samples.items(), key=lambda x: x[1],reverse = True)
-    else:
-        sorted_averages = [(k,v) for k,v in averaged_samples.items()]
+
+    sorted_averages = [(k,v) for k,v in averaged_samples.items()]
 
     return [k[0] for k in sorted_averages],common_subjects
 

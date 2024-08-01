@@ -1,6 +1,8 @@
 data/original
 data/consistency
 data/attack
+data_old
+prediction_old
 plots
 prediction
 results

@@ -2,8 +2,8 @@
 
 ## setup the code parameters
 
-module load cuda11.7/toolkit
-module load cuda11.7/blas
+module load cuda12.2/toolkit
+module load cuda12.2/blas
 
 export OMP_NUM_THREADS=8
 # The required free memory in MiB

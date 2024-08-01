@@ -83,7 +83,7 @@ def main():
         if not os.path.exists(edit_path):
             generate_edit = True
             ds,choice_key = load_hf_ds(args.dataset_name,args.seed)
-            checked_ds,ommited = check_subject(ds)
+            checked_ds,_ = check_subject(ds)
             edited_ds = filter_samples(checked_ds)
         else:
             with open(edit_path,'r') as f:
@@ -96,8 +96,6 @@ def main():
         
         edited_known_ds_path = f"{edited_known_dir}/{args.model_name}_{args.expl_type}_{edit_type}.jsonl"
         if not os.path.exists(edited_known_ds_path):
-            # if edit_type == 'cf':
-            #     edited_ds = [d for d in edited_ds if d['valid_cf']]
             edited_known_ds,_ = get_known_dataset(edited_ds,mt,batch_size = args.batch_size,choice_key = choice_key,model_name = args.model_name,args = args,use_fs = use_fs,ds_type = edit_type)
             with open(edited_known_ds_path,'w') as f:
                 for d in edited_known_ds:

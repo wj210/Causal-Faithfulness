@@ -40,7 +40,6 @@ def main():
     aa("--metric",default = 'causal',type = str,choices = ['causal','cc_shap','mistake','paraphrase','cf_edit','plausibility'])
     aa("--faithfulness_type",default = 'input_output_p',type = str,help = 'expl_output is the 1st causal metric, input_output is the 2nd causal metric, p is paraphrased, cf is counterfactual') 
     aa("--openai_api_key", default="openai_key.txt")
-    aa("--random",action = 'store_true',help = 'randomly select samples instead of maximal total effect')
     args = parser.parse_args()
 
     if args.metric in ['paraphrase','mistake','plausibility']:
@@ -51,13 +50,6 @@ def main():
     """
     known_paths,known_edit_paths = [],[]
     edit_type = 'paraphrase' if args.metric != 'cf_edit' else 'cf'
-    
-    if not args.random:
-        additional_path_flag = ''
-        take_max = True
-    else:
-        additional_path_flag = '_r'
-        take_max = False
 
     for seed in range(args.num_seed):
         ## original
@@ -65,12 +57,12 @@ def main():
         known_paths.append(f"{known_ds_dir}/{args.model_name}_{args.expl_type}.jsonl")
         known_edit_paths.append(f"data/consistency/{seed}/{args.dataset_name}/{args.model_name}_{args.expl_type}_paraphrase.jsonl")
 
-    averaged_known_ids,known_subjects = get_common_samples(known_paths,type_ = 'original',max = take_max)
-    averaged_known_edit_ids,edit_subjects = get_common_samples(known_edit_paths,type_ = "paraphrase",max = take_max)
+    averaged_known_ids,known_subjects = get_common_samples(known_paths,type_ = 'original')
+    averaged_known_edit_ids,edit_subjects = get_common_samples(known_edit_paths,type_ = "paraphrase")
 
-    if args.random: # randomly shuffle the ids instead of max ranking.
-        random.seed(42)
-        random.shuffle(averaged_known_ids)
+    ## randomly pick samples
+    random.seed(42)
+    random.shuffle(averaged_known_ids)
 
     selected_ids = []
     for o_id in averaged_known_ids:
@@ -88,7 +80,6 @@ def main():
     model_path,
     low_cpu_mem_usage=True,
     torch_dtype=(torch.bfloat16),
-    #   if 'gemma2' not in args.model_name or 'causal' not in args.metric else (torch.float32),
     m_name = args.model_name
     )
 
@@ -103,11 +94,11 @@ def main():
         known_ds_path = f"{known_ds_dir}/{args.model_name}_{args.expl_type}.jsonl"
         edited_known_ds_path = f"data/consistency/{seed}/{args.dataset_name}/{args.model_name}_{args.expl_type}_{edit_type}.jsonl"
 
-        orig_output_causal_path = os.path.join(prediction_dir,f'{args.expl_type}_output_original{additional_path_flag}.pkl') #**
-        orig_expl_causal_path = os.path.join(prediction_dir,f'{args.expl_type}_expl_original{additional_path_flag}.pkl') #**
+        orig_output_causal_path = os.path.join(prediction_dir,f'{args.expl_type}_output_original.pkl') #**
+        orig_expl_causal_path = os.path.join(prediction_dir,f'{args.expl_type}_expl_original.pkl') #**
 
-        edit_output_causal_path = os.path.join(prediction_dir,f'{args.expl_type}_output_{edit_type}{additional_path_flag}.pkl') #**
-        edit_expl_causal_path = os.path.join(prediction_dir,f'{args.expl_type}_expl_{edit_type}{additional_path_flag}.pkl') #**
+        edit_output_causal_path = os.path.join(prediction_dir,f'{args.expl_type}_output_{edit_type}.pkl') #**
+        edit_expl_causal_path = os.path.join(prediction_dir,f'{args.expl_type}_expl_{edit_type}.pkl') #**
         ##
         
         ## Checks ##

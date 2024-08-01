@@ -11,15 +11,13 @@ fi
 bs=24
 num_samples=100
 corrupted_samples=5
-expl_type='post_hoc'
-model_name='llama3-8B-chat'
-# model_name=phi3-chat
+expl_type='cot'
+model_name='gemma-2B-chat'
 metric=causal
 faithfulness_type=input_output_p
-dataset_name='arc'
+dataset_name='esnli'
 
-
-for expl_type in cot 
+for expl_type in post_hoc cot
 do
   for seed in 0 1 2
   do

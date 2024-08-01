@@ -240,7 +240,8 @@ def calculate_hidden_flow(
     batch_size = 32,
     use_kv_caching = True, # use it for sequential outputs to save computation (should set to fp16 or 32),
     scores = None,
-    use_fs = False # if use_fs need to ensure find_token_range args find_sub_range is True
+    use_fs = False, # if use_fs need to ensure find_token_range args find_sub_range is True
+    average_sequence = True, # if cot, we dont average over the sequences.
 ):
     """
     Runs causal tracing over every token/layer combination in the network
@@ -294,7 +295,7 @@ def calculate_hidden_flow(
                 mt.model, low_score_inp, [], ans_token, e_range, noise=noise, uniform_noise=uniform_noise,past_kv = low_past_kv if use_kv_caching and len(answer_t) > 1 else None,num_samples = samples)
             low_score_inp = torch.tensor(ans_token).repeat(low_score_inp.shape[0],1).to(low_score_inp.device)
             low_score_store.append(low_score.item())
-        base_score = generate_sequence_probs(inp[:1],mt,answer_t)
+        base_score = generate_sequence_probs(inp[:1],mt,answer_t,return_type = 'mean' if average_sequence else None)
         if 'gemma2' in mt.model_name:
             del low_past_kv
             torch.cuda.empty_cache()
@@ -303,8 +304,11 @@ def calculate_hidden_flow(
         low_score_store = scores['low_score']
         base_score = scores['high_score']
 
+
     if len(answer_t) > 1:
-        low_score = torch.tensor(low_score_store).mean()
+        low_score = torch.tensor(low_score_store)
+        if average_sequence:
+            low_score = low_score.mean()
     else:
         low_score = low_score_store[0] if isinstance(low_score_store,list) else low_score_store
         low_score = torch.tensor(low_score)
@@ -312,7 +316,7 @@ def calculate_hidden_flow(
     ## Patching ##
     differences = trace_important_states(
         mt.model,
-        mt.num_layers if '70b' not in mt.model_name.lower() else range(0,mt.num_layers,2), # for 70b models, we skip every other layer
+        mt.num_layers,
         inp,
         e_range,
         answer_t,
@@ -327,14 +331,16 @@ def calculate_hidden_flow(
     differences = differences.detach().cpu()
     
     if len(answer_t) > 1:
-        sum_differences = differences.mean(dim = -1)
+        if average_sequence:
+            differences = differences.mean(dim = -1)
     else:
-        sum_differences = differences.squeeze(-1)
-    sum_differences = sum_differences - low_score ## add in the difference p(o*,h,i) - p(o*)
+        differences = differences.squeeze(-1)
+    if average_sequence: # for cot, dont minus yet.
+        differences = differences - low_score ## add in the difference p(o*,h,i) - p(o*)
     
 
     return dict(
-        scores=sum_differences,
+        scores=differences,
         low_score=low_score,
         high_score=base_score,
         input_ids=inp[0],
@@ -581,7 +587,7 @@ def generate_sequence_probs(inps,mt,answers,return_type = 'mean'):
     if return_type == 'mean':
         return numpy.mean(base_score)
     else:
-        return numpy.exp(numpy.log(base_score).sum())
+        return numpy.array(base_score)
 
 def collect_embedding_std(mt, subjects):
     alldata = []
