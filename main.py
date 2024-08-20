@@ -3,7 +3,7 @@ import torch, numpy,random
 from utils.causal_trace import *
 from utils.extra_utils import *
 from utils.prediction import *
-from utils.model_data_utils import ModelAndTokenizer,get_model_path,load_hf_ds
+from utils.model_data_utils import ModelAndTokenizer,get_model_path
 import argparse
 import pickle
 
@@ -58,21 +58,26 @@ def main():
         known_edit_paths.append(f"data/consistency/{seed}/{args.dataset_name}/{args.model_name}_{args.expl_type}_paraphrase.jsonl")
 
     ori_preds,known_subjects = get_common_samples(known_paths,type_ = 'original')
-    edit_preds,edit_subjects = get_common_samples(known_edit_paths,type_ = "paraphrase")
+    
 
     ## ensure for each sample id, the ori and edit predictions are the same ##
-    applicable_ids = set()
-    for ok,op in ori_preds.items():
-        if ok not in edit_preds:
-            continue
-        ep = edit_preds[ok]
-        add = True
-        for ori_p,edit_p in zip(op,ep):
-            if ori_p != edit_p:
-                add = False
-                break
-        if add:
-            applicable_ids.add(ok)
+    if args.metric == 'FEC':
+        edit_preds,edit_subjects = get_common_samples(known_edit_paths,type_ = "paraphrase")
+        applicable_ids = set()
+        for ok,op in ori_preds.items():
+            if ok not in edit_preds:
+                continue
+            ep = edit_preds[ok]
+            add = True
+            for ori_p,edit_p in zip(op,ep):
+                if ori_p != edit_p:
+                    add = False
+                    break
+            if add:
+                applicable_ids.add(ok)
+    else:
+        applicable_ids = set(ori_preds.keys())
+
     
     ## randomly pick samples
     random.seed(42)
@@ -88,7 +93,7 @@ def main():
     m_name = args.model_name
     )
     
-    ## Checks ##
+    ## Sanity Checks ##
     if args.metric in ['paraphrase','mistake','biased','early_answering']:
         assert args.expl_type == 'cot', 'Only cot is supported for semantic attacks'
     elif args.metric == 'cf_edit':
@@ -109,23 +114,14 @@ def main():
 
         known_ds_dir = f'data/original/{seed}/{args.dataset_name}'
         known_ds_path = f"{known_ds_dir}/{args.model_name}_{args.expl_type}.jsonl"
-        edited_known_ds_path = f"data/consistency/{seed}/{args.dataset_name}/{args.model_name}_{args.expl_type}_{edit_type}.jsonl"
-
         orig_output_causal_path = os.path.join(prediction_dir,f'{args.expl_type}_output_original{path_flag}.pkl') #**
         orig_expl_causal_path = os.path.join(prediction_dir,f'{args.expl_type}_expl_original{path_flag}.pkl') #**
-
-        edit_output_causal_path = os.path.join(prediction_dir,f'{args.expl_type}_output_{edit_type}.pkl') #**
-        edit_expl_causal_path = os.path.join(prediction_dir,f'{args.expl_type}_expl_{edit_type}.pkl') #**
         ##
         
         ## Known/edit path for each seed ##
         with open(known_ds_path,'r') as f:
             known_ds = [json.loads(l) for l in f.readlines()]
         original_noise_level = float(args.noise_level[1:]) * collect_embedding_std(mt, known_subjects)
-
-        with open(edited_known_ds_path,'r') as f:
-            edited_known_ds = [json.loads(l) for l in f.readlines()]
-        edited_noise_level = float(args.noise_level[1:]) * collect_embedding_std(mt, edit_subjects)
 
         if args.metric in ['fec','feac']:
             ## Check for remaining samples via sample_id, only run again for samples not collected ##
@@ -159,6 +155,12 @@ def main():
             
 
             if args.metric == 'fec':
+                edited_known_ds_path = f"data/consistency/{seed}/{args.dataset_name}/{args.model_name}_{args.expl_type}_{edit_type}.jsonl"
+                edit_output_causal_path = os.path.join(prediction_dir,f'{args.expl_type}_output_{edit_type}.pkl') #**
+                edit_expl_causal_path = os.path.join(prediction_dir,f'{args.expl_type}_expl_{edit_type}.pkl') #**
+                with open(edited_known_ds_path,'r') as f:
+                    edited_known_ds = [json.loads(l) for l in f.readlines()]
+                edited_noise_level = float(args.noise_level[1:]) * collect_embedding_std(mt, edit_subjects)
                 if os.path.exists(edit_output_causal_path):
                     with open(edit_output_causal_path,'rb') as f:
                         edit_output_store = pickle.load(f)

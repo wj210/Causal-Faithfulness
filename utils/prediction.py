@@ -444,41 +444,42 @@ def get_known_dataset(ds,mt,batch_size = 8,choice_key =[],model_name = 'llama3',
                 out_ds.ds[sample_ids[i]]['explanation_prompt'] = batch['prompt'][i]
         out_ds = list(out_ds.ds.values())
         
-        if int(args.noise_level[-1]): # just for ablation
-            corrupted_ds = TorchDS(out_ds,mt.tokenizer,choice_key,model_name,use_fs = use_fs,ds_name = args.dataset_name,expl = 'post_hoc',corrupt = True,ds_type = ds_type)
-            corrupted_expl_ds = []
-            for s in tqdm(corrupted_ds.batched_ds,total = len(corrupted_ds),desc = 'Getting corrupted samples'):
-                prompt = s['input_ids']
-                s_id = s['sample_id']
-                answer_t = mt.tokenizer.encode(corrupted_ds.ds[s_id]['explanation'],add_special_tokens = False)
-                high_expl_score = generate_sequence_probs(prompt.unsqueeze(0).to(mt.model.device),mt,answer_t).item()
-                corrupt_range = find_token_range(mt.tokenizer, prompt, corrupted_ds.ds[s_id][subject_key],find_sub_range=use_fs)
-                corrupt_prompt = prompt.repeat(1+args.corrupted_samples,1).to(mt.model.device)
-                if 'gemma2-' in mt.model_name:
-                    past_kv_cache = HybridCache(config=mt.model.config,
-                                            max_batch_size=corrupt_prompt.shape[0], 
-                                            max_cache_len=corrupt_prompt.shape[-1] + len(answer_t),
-                                            dtype = mt.model.dtype,
-                                            device = corrupt_prompt.device
-                                            )
-                    cache_position = torch.arange(corrupt_prompt.shape[1],dtype = torch.int32).to(corrupt_prompt.device)
-                    past_kv = (past_kv_cache,cache_position)
-                else:
-                    past_kv = None
-                expl_low_score = []
+        # if int(args.noise_level[-1]) != 3: # just for ablation purposes 
+        
+        #     corrupted_ds = TorchDS(out_ds,mt.tokenizer,choice_key,model_name,use_fs = use_fs,ds_name = args.dataset_name,expl = 'post_hoc',corrupt = True,ds_type = ds_type)
+        #     corrupted_expl_ds = []
+        #     for s in tqdm(corrupted_ds.batched_ds,total = len(corrupted_ds),desc = 'Getting corrupted samples'):
+        #         prompt = s['input_ids']
+        #         s_id = s['sample_id']
+        #         answer_t = mt.tokenizer.encode(corrupted_ds.ds[s_id]['explanation'],add_special_tokens = False)
+        #         high_expl_score = generate_sequence_probs(prompt.unsqueeze(0).to(mt.model.device),mt,answer_t).item()
+        #         corrupt_range = find_token_range(mt.tokenizer, prompt, corrupted_ds.ds[s_id][subject_key],find_sub_range=use_fs)
+        #         corrupt_prompt = prompt.repeat(1+args.corrupted_samples,1).to(mt.model.device)
+        #         if 'gemma2-' in mt.model_name:
+        #             past_kv_cache = HybridCache(config=mt.model.config,
+        #                                     max_batch_size=corrupt_prompt.shape[0], 
+        #                                     max_cache_len=corrupt_prompt.shape[-1] + len(answer_t),
+        #                                     dtype = mt.model.dtype,
+        #                                     device = corrupt_prompt.device
+        #                                     )
+        #             cache_position = torch.arange(corrupt_prompt.shape[1],dtype = torch.int32).to(corrupt_prompt.device)
+        #             past_kv = (past_kv_cache,cache_position)
+        #         else:
+        #             past_kv = None
+        #         expl_low_score = []
                 
-                for answer_ in answer_t:
-                    low_score,past_kv = trace_with_patch(
-                        mt.model, corrupt_prompt, [], answer_, corrupt_range, noise=noise_level, uniform_noise=False,past_kv = past_kv ,num_samples = args.corrupted_samples
-                    )
-                    corrupt_prompt = torch.tensor(answer_).repeat(corrupt_prompt.shape[0],1).to(corrupt_prompt.device)
-                    expl_low_score.append(low_score.item())
-                expl_low_score= np.mean(expl_low_score).item()
-                corrupted_ds.ds[s_id]['expl_high_score'] =high_expl_score
-                corrupted_ds.ds[s_id]['expl_low_score'] = expl_low_score
-                corrupted_ds.ds[s_id]['expl_difference'] = (high_expl_score - expl_low_score)/high_expl_score
-                corrupted_expl_ds.append(corrupted_ds.ds[s['sample_id']])
-            out_ds = corrupted_expl_ds
+        #         for answer_ in answer_t:
+        #             low_score,past_kv = trace_with_patch(
+        #                 mt.model, corrupt_prompt, [], answer_, corrupt_range, noise=noise_level, uniform_noise=False,past_kv = past_kv ,num_samples = args.corrupted_samples
+        #             )
+        #             corrupt_prompt = torch.tensor(answer_).repeat(corrupt_prompt.shape[0],1).to(corrupt_prompt.device)
+        #             expl_low_score.append(low_score.item())
+        #         expl_low_score= np.mean(expl_low_score).item()
+        #         corrupted_ds.ds[s_id]['expl_high_score'] =high_expl_score
+        #         corrupted_ds.ds[s_id]['expl_low_score'] = expl_low_score
+        #         corrupted_ds.ds[s_id]['expl_difference'] = (high_expl_score - expl_low_score)/high_expl_score
+        #         corrupted_expl_ds.append(corrupted_ds.ds[s['sample_id']])
+        #     out_ds = corrupted_expl_ds
     
     for dict in out_ds:
         for k,v in dict.items():

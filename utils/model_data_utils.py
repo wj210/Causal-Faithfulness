@@ -106,7 +106,7 @@ class ModelAndTokenizer:
     
 
 
-def load_hf_ds(ds_name,seed=0):
+def load_hf_ds(ds_name,seed=0,metric = 'feac'):
     """
     Standardized keys: question, choices, subject, answer
     esnli select if the subject - rationale tokens of the premise is continuous ie 2,3,4 instead of 2,7,8. (there is 3 rationales per example)
@@ -208,6 +208,7 @@ def load_hf_ds(ds_name,seed=0):
                     'question':d['question'],
                     'choices': choices,
                     'answer': answer,
+                    'subject': 'none',
                 }
                 formatted_ds.append(dd)
             ds_w_subject,total_cost = extract_subject_from_questions(formatted_ds)
