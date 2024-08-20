@@ -8,50 +8,31 @@ else
   echo "cuda_visible_devices.txt file not found."
 fi
 
-bs=24
+bs=32
 num_samples=100
 corrupted_samples=5
-expl_type='cot'
-model_name='llama3-8B'
+expl_type='post_hoc'
+model_name='gemma-2B-chat'
 metric=causal
 faithfulness_type=input_output_p
 dataset_name='csqa'
 
-for expl_type in post_hoc
+for noise_level in s1 s2 s3 s4 s5
 do
-  # for seed in 0 1 2
-  # do
-  #   python get_known_ds.py \
-  #   --dataset_name $dataset_name \
-  #   --num_samples $num_samples \
-  #   --batch_size $bs \
-  #   --corrupted_samples $corrupted_samples \
-  #   --expl_type $expl_type \
-  #   --model_name $model_name \
-  #   --seed $seed
-  # done
-  
-
-  python main.py \
-  --dataset_name $dataset_name \
-  --num_samples $num_samples \
-  --batch_size $bs \
-  --corrupted_samples $corrupted_samples \
-  --expl_type $expl_type \
-  --model_name $model_name \
-  --metric $metric \
-  --faithfulness_type $faithfulness_type \
-  
-  # cc shap
-  python main.py \
-  --dataset_name $dataset_name \
-  --num_samples $num_samples \
-  --batch_size $bs \
-  --corrupted_samples $corrupted_samples \
-  --expl_type $expl_type \
-  --model_name $model_name \
-  --metric cc_shap \
-  --faithfulness_type $faithfulness_type \
-  
+  for dataset_name in arc esnli csqa
+  do
+    python get_known_ds.py \
+    --dataset_name $dataset_name \
+    --num_samples $num_samples \
+    --batch_size $bs \
+    --corrupted_samples $corrupted_samples \
+    --expl_type $expl_type \
+    --model_name $model_name \
+    --seed 0 \
+    --noise_level $noise_level 
+    
+  done
 done
+
+
 

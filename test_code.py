@@ -10,13 +10,11 @@ from tqdm import tqdm
 from time import time
 from transformers.cache_utils import HybridCache, DynamicCache
 
-
-
-seed = 2
-torch.manual_seed(seed)
-torch.cuda.manual_seed_all(seed)
-np.random.seed(seed)
-random.seed(seed)
+# seed = 2
+# torch.manual_seed(seed)
+# torch.cuda.manual_seed_all(seed)
+# np.random.seed(seed)
+# random.seed(seed)
 
 def get_num_layers(model):
     total_layers = []
@@ -35,8 +33,9 @@ def get_num_layers(model):
     return num_layers
 
 # m_path = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-m_path = "google/gemma-2b-it"
-# gguf_file = "gemma-2-27b-it-Q6_K_L.gguf"
+m_path = "google/gemma-2-27b-it"
+# m_path = 'bartowski/gemma-2-27b-it-GGUF'
+gguf_file = "gemma-2-27b-it-Q6_K_L.gguf"
 # m_path = "meta-llama/Meta-Llama-3-8B-Instruct"
 # m_path = 'microsoft/Phi-3-mini-4k-instruct'
 # m_path = "EleutherAI/gpt-neo-1.3B"
@@ -46,12 +45,11 @@ m_path = "google/gemma-2b-it"
 # m_path = "casperhansen/llama-3-70b-instruct-awq"
 tokenizer = AutoTokenizer.from_pretrained(m_path)
     
-if '70B' not in m_path:
+if '27B' not in m_path and '70B' not in m_path:
     m = AutoModelForCausalLM.from_pretrained(m_path,torch_dtype = torch.bfloat16 if 'gpt2' not in m_path else torch.float32,attn_implementation="flash_attention_2" if 'gpt2' not in m_path else None,device_map = 'auto',trust_remote_code = True).eval()
 else:
-    quant_config = BitsAndBytesConfig(load_in_4bit=True,bnb_4bit_compute_dtype=torch.bfloat16)
-    m = AutoModelForCausalLM.from_pretrained(m_path,quantization_config = quant_config,torch_dtype = torch.bfloat16,attn_implementation="flash_attention_2" if 'gpt2' not in m_path else None,device_map = 'auto',trust_remote_code = True).eval()
-    # m = AutoAWQForCausalLM.from_quantized(m_path, fuse_layers=False).eval()
+    quant_config = BitsAndBytesConfig(load_in_4bit=True,bnb_4bit_compute_dtype=torch.bfloat16,bnb_4bit_quant_type="nf4")
+    m = AutoModelForCausalLM.from_pretrained(m_path,quantization_config = quant_config,torch_dtype = torch.bfloat16,attn_implementation="flash_attention_2" if 'gpt2' not in m_path else None,device_map = 'auto',trust_remote_code = True,low_cpu_mem_usage=True).eval()
 chat = True if 'gpt2' not in m_path else False
 # chat=False
 # data_path = "data/esnli_test.jsonl"
@@ -65,6 +63,9 @@ else:
 
 # random.shuffle(data)
 scores = []
+# m.forward = torch.compile(m.forward, mode="reduce-overhead", fullgraph=True)
+# m._supports_cache_class = True
+# m.generation_config.cache_implementation = None
 for j,d in tqdm(enumerate(data),total=len(data)):
     joined_choice = join_choices(d['choices'])
     prompt = format_mcq(d['question'],joined_choice,is_chat=chat)
@@ -74,31 +75,45 @@ for j,d in tqdm(enumerate(data),total=len(data)):
     all_inps = []
     all_labels= []
     ans = d['answer']
-    tokenized_prompt = torch.tensor(tokenizer.encode(prompt),dtype = torch.long).unsqueeze(0).to(m.device)
+    tokenized_prompt = torch.tensor(tokenizer.encode(prompt),dtype = torch.long).repeat(4,1).to(m.device)
     t = time()
-    # cache = HybridCache(config=m.config, max_batch_size=tokenized_prompt.shape[0], max_cache_len=100
-    #                     ,dtype = torch.bfloat16
-    #                     )
+    cache = HybridCache(config=m.config, max_batch_size=tokenized_prompt.shape[0], max_cache_len=100
+                        ,dtype = m.dtype,
+                        device = m.device
+                        )
     cache_position = torch.arange(tokenized_prompt.shape[1],dtype = torch.int32).to(m.device)
-    with torch.no_grad():
-        out = m(tokenized_prompt,use_cache = True)
+    cache = None
+    all = []
+    for _ in range(10):
+        t = time()
+        with torch.no_grad():
+            out = m(tokenized_prompt,use_cache = True,past_key_values = cache,cache_position = cache_position)
+            # out = m(tokenized_prompt,use_cache = True,past_key_values = cache)
         # out = m.generate(tokenized_prompt,do_sample=True,max_new_tokens=1,pad_token_id = tokenizer.eos_token_id)
-    next_token = out.logits[0, -1].argmax()
-    cache_position_next = cache_position[-1:] + 1
-    print(next_token, repr(tokenizer.decode(next_token.item())))
-
-    concatted = torch.cat([tokenized_prompt, next_token.unsqueeze(0).unsqueeze(0)], dim=-1)
-    cache_position_concatted = torch.cat([cache_position, cache_position_next], dim=-1)
-
-    with torch.no_grad():
-        out2_manual = m(concatted, cache_position=cache_position_concatted)
-        out2_opt = m(next_token.unsqueeze(0).unsqueeze(0), cache_position=cache_position_next, use_cache=True, past_key_values=cache)
-
-    print(tokenizer.decode(out2_manual.logits[0, -1].argmax()), tokenizer.decode(out2_opt.logits[0, -1].argmax()))
+        next_token = out.logits[:, -1].argmax(dim=-1)
+        # cache = out.past_key_values
+        tokenized_prompt = next_token.unsqueeze(-1)
+        cache_position = cache_position[-1:] + 1
+        # all.append(next_token.item())
+        print (time()-t)
+    # print (tokenizer.decode(all))
     exit()
-    pred = tokenizer.decode(out[0,tokenized_prompt.shape[1]:],skip_special_tokens=True)
-    scores.append(int(pred == ans))
+    
+        
+    # print(next_token, repr(tokenizer.decode(next_token.item())))
 
-print (np.mean(scores))
+    # concatted = torch.cat([tokenized_prompt, next_token.unsqueeze(0).unsqueeze(0)], dim=-1)
+    # cache_position_concatted = torch.cat([cache_position, cache_position_next], dim=-1)
+
+    # with torch.no_grad():
+    #     out2_manual = m(concatted, cache_position=cache_position_concatted)
+    #     out2_opt = m(next_token.unsqueeze(0).unsqueeze(0), cache_position=cache_position_next, use_cache=True, past_key_values=cache)
+
+    # print(tokenizer.decode(out2_manual.logits[0, -1].argmax()), tokenizer.decode(out2_opt.logits[0, -1].argmax()))
+    # exit()
+    # pred = tokenizer.decode(out[0,tokenized_prompt.shape[1]:],skip_special_tokens=True)
+    # scores.append(int(pred == ans))
+
+# print (np.mean(scores))
 
 

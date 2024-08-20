@@ -11,7 +11,7 @@ REQUIRED_MEMORY=39000  # For example, 70 GB
 REQUIRED_GPUS=1    # Number of GPUs needed
 
 p=PA100q
-w=node03
+w=node04
 # p=RTXA6Kq
 # w=node09
 c=4 # num cpus
@@ -101,7 +101,7 @@ allocate_gpu_memory() {
 
 allocate_gpu_memory
 
-srun -p $p -w $w -c $c --verbose --job-name=self_learning --gpus=$num_gpu bash scripts/runs/run_7.sh
+srun -p $p -w $w -c $c --verbose --job-name=self_learning --gpus=$num_gpu bash scripts/runs/run_9.sh
 
 
 

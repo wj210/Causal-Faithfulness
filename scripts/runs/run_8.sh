@@ -8,37 +8,25 @@ else
   echo "cuda_visible_devices.txt file not found."
 fi
 
-bs=48
+bs=16
 num_samples=100
 corrupted_samples=5
 expl_type='post_hoc'
-model_name='gemma-2B'
+model_name='llama3-8B-chat'
 metric=causal
 faithfulness_type=input_output_p
 dataset_name='csqa'
 
-for dataset_name in csqa arc esnli
+for ablate_noise in s4
 do
   python main.py \
   --dataset_name $dataset_name \
   --num_samples $num_samples \
   --batch_size $bs \
   --corrupted_samples $corrupted_samples \
-  --expl_type post_hoc \
+  --expl_type $expl_type \
   --model_name $model_name \
-  --metric $metric \
+  --metric causal \
   --faithfulness_type $faithfulness_type \
-
-  python main.py \
-  --dataset_name $dataset_name \
-  --num_samples $num_samples \
-  --batch_size $bs \
-  --corrupted_samples $corrupted_samples \
-  --expl_type cot \
-  --model_name $model_name \
-  --metric $metric \
-  --faithfulness_type $faithfulness_type \
-  --num_seed 1
-
+  --ablate_noise $ablate_noise
 done
-

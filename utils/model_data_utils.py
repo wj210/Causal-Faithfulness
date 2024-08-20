@@ -26,7 +26,10 @@ def get_model_path(model_name,expl_type):
             llama_size = f"{model_name.split('-')[-1]}".lower()
         model_path = f"meta-llama/Llama-2-{llama_size}{chat_string}-hf"
     elif 'gemma-' in model_name:
-        model_path = f"google/gemma-{model_name.split('-')[-2].lower()}-it"
+        if 'chat' in model_name:
+            model_path = f"google/gemma-{model_name.split('-')[-2].lower()}-it"
+        else:
+            model_path = f"google/gemma-{model_name.split('-')[-1].lower()}"
     elif 'gemma2' in model_name:
         model_path = f"google/gemma-2-{model_name.split('-')[-2].lower()}-it"
     elif 'gpt2' in model_name:
@@ -59,10 +62,10 @@ class ModelAndTokenizer:
             tokenizer.padding_side = 'left'
         if model is None:
             assert model_name is not None
-            if '27b' in model_name.lower():
-                quant_config = BitsAndBytesConfig(load_in_4bit=True,bnb_4bit_compute_dtype=torch.bfloat16,bnb_4bit_quant_type="nf4")
-            else:
-                quant_config = None
+            # if '27b' in model_name.lower() or '70b' in model_name.lower(): # gemma2-27b load in 4bit
+            #     quant_config = BitsAndBytesConfig(load_in_4bit=True,bnb_4bit_compute_dtype=torch.bfloat16,bnb_4bit_quant_type="nf4")
+            # else:
+            quant_config = None
             model = AutoModelForCausalLM.from_pretrained(
                 model_name, 
                 low_cpu_mem_usage=low_cpu_mem_usage,

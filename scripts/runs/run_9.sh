@@ -12,21 +12,21 @@ bs=16
 num_samples=100
 corrupted_samples=5
 expl_type='post_hoc'
-model_name='gemma-2B-chat'
-# model_name=phi3-chat
-metric=cf_edit
+model_name='llama3-8B-chat'
+metric=causal
 faithfulness_type=input_output_p
-dataset_name='esnli'
+dataset_name='csqa'
 
-
-for seed in 0 
-  do
-    python get_known_ds.py \
-    --dataset_name $dataset_name \
-    --num_samples $num_samples \
-    --batch_size $bs \
-    --corrupted_samples $corrupted_samples \
-    --expl_type $expl_type \
-    --model_name $model_name \
-    --seed $seed
-  done
+for ablate_noise in s5
+do
+  python main.py \
+  --dataset_name $dataset_name \
+  --num_samples $num_samples \
+  --batch_size $bs \
+  --corrupted_samples $corrupted_samples \
+  --expl_type $expl_type \
+  --model_name $model_name \
+  --metric causal \
+  --faithfulness_type $faithfulness_type \
+  --ablate_noise $ablate_noise 
+done

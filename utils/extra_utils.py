@@ -44,6 +44,12 @@ def untuple_dict(x,ks):
         return x
     return x
 
+def unroll_list(x):
+    if isinstance(x[0],list):
+        return sum(x,[])
+    else:
+        return x
+
 def list_of_alpha(n):
     return [chr(i+97).upper() for i in range(n)]
 
@@ -123,11 +129,10 @@ def top_n_indices(tensor, N):
     return top_n_indices_2d, top_n_values
 
 def clean_explanation(e):
-    e = e.strip()
     if 'Question' in e:
         return e.split('Question')[0].strip()
     else:
-        e = e.split('\n')[0].strip()
+        e = e.split('\n\n')[0].strip()
     return e
 
 def tokenize_single_answer(x,tokenizer,model_name):
@@ -137,8 +142,10 @@ def tokenize_single_answer(x,tokenizer,model_name):
         return tokenizer.encode('\n'+x,add_special_tokens=False)[2:][0] # other models have leading char infront. remove it
 
 def cal_cost(model_name,in_tokens,out_tokens):
-    if 'gpt-4' in model_name:
+    if model_name == 'gpt-4':
         cost = in_tokens * (10/1e6) + (out_tokens * (30/1e6))
+    elif model_name == 'gpt-4o':
+        cost = in_tokens * (5/1e6) + (out_tokens * (15/1e6))
     elif model_name == 'gpt-3.5-turbo-0125':
         cost = in_tokens * (0.5/1e6) + (out_tokens * (1.5/1e6))
     elif model_name == 'gpt-3.5-turbo-instruct':
@@ -215,24 +222,16 @@ def get_common_samples(paths,type_):
                     common_subjects[d['sample_id']] = d['question']
                 else:
                     common_subjects[d['sample_id']] = d[f'{type_}_question']
-            if not d['correct']:
-                continue
-            common_samples[d['sample_id']].append(d['difference'])
+            common_samples[d['sample_id']].append(d['pred'])
             
     
-    common_samples = {k:v for k,v in common_samples.items() if len(v) == len(paths)} 
+    common_samples = {k:v for k,v in common_samples.items() if len(v) == len(paths)}
     common_subjects = [v for k,v in common_subjects.items() if k in common_samples] # get the subjects of the common samples to get noise
-    averaged_samples = {k:np.mean(v) for k,v in common_samples.items()}
 
-    sorted_averages = [(k,v) for k,v in averaged_samples.items()]
-
-    return [k[0] for k in sorted_averages],common_subjects
+    return common_samples,common_subjects
 
 def remove_punctuations(s):
     return re.sub(r'[^\w\s]','',s)
 
 
-# if __name__ == "__main__":
-#     d = {'question':"The end result in the process of photosynthesis is the production of sugar and oxygen. Which step signals the beginning of photosynthesis?",'subject':"signals the beginning of photosynthesis"}
-#     print (filter_samples([d]))
 

@@ -7,7 +7,7 @@ module load cuda11.7/blas
 
 export OMP_NUM_THREADS=8
 # The required free memory in MiB
-REQUIRED_MEMORY=79000  # For example, 70 GB
+REQUIRED_MEMORY=70000  # For example, 70 GB
 REQUIRED_GPUS=1    # Number of GPUs needed
 
 p=NA100q

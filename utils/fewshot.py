@@ -88,12 +88,6 @@ fs_examples = {"csqa":[
     }
 
 edit_fs = [
-    {'question': "Marla starts running around a circular track at the same time Nick starts walking around the same circular track. Marla completes 32 laps around the track per hour and Nick completes 12 laps around the track per hour. How many minutes after Marla and Nick begin moving will Marla have completed 5 more laps around the track than Nick?",
-     'choices': ['12','5','8','20','15'],
-     'original':'Marla completes 32 laps and Nick completes 12 laps per hour. So Marla completes 20 more laps per hour than Nick. 5 laps is 1/4 of 20 laps. So Marla will complete 5 more laps than Nick in 15 minutes.',
-     'mistake': 'Marla completes 30 laps and Nick completes 10 laps per hour, so Marla completes 15 more laps per hour than Nick. 5 laps is 1/5 of 15 laps. So Marla will complete 5 more laps than Nick in 12 minutes.',
-     'paraphrase': 'Marla and Nick completes 32 and 12 laps per hour respectively. So Marla will be ahead by 20 more laps per hour than Nick. Since 5 laps is 1/4 of 20 laps. So Marla will be ahead of Nick by 5 more laps in 15 minutes.'
-     },
      {'question': "Sammy wanted to go to where the people were. Where might he go?",
      'choices': ["race track", "populated areas", "the desert", "apartment", "roadblock"],
      'original':'A populated area is filled with people. Sammy wants to go to places with people. Therefore, Sammy would go to a populated area.',
@@ -104,7 +98,7 @@ edit_fs = [
         'choices': ["pretty flowers.", "hen house", "natural habitat", "storybook", "dense forest"],
         "original": "The fox is an animal that does not belong in the city. Since it walked into the forest, it was likely looking for its natural habitat.",
         'mistake':"The fox is an animal that belongs in the city. Since it walked into the forest, it was likely looking for a hen house.",
-        'paraphrase': "Since the fox do not belong in the city and walked into the forest. It was likely looking for its natural habitat."
+        'paraphrase': "Since the fox do not belong in the city and walked into the forest. Natural habitat is the most optimal choice."
      }
 ]
 

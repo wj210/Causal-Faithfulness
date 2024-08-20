@@ -32,7 +32,7 @@ def aggregate_values_explanation(shap_value, tokenizer,to_marginalize =' Yes. Wh
     """
     len_to_marginalize = tokenizer([to_marginalize], return_tensors="pt", padding=False, add_special_tokens=False).input_ids.shape[1]
     add_to_base = np.abs(shap_value[len_to_marginalize:]).sum(axis=0)
-    ratios = shap_value / (np.abs(shap_value).sum(axis=0) - add_to_base) * 100
+    ratios = shap_value / (np.abs(shap_value).sum(axis=0) - add_to_base)
     out = np.mean(ratios,axis=-1)[:len_to_marginalize]
     return out
 
@@ -90,32 +90,47 @@ def cc_shap_measure(tokenizer,explainer,output_args,is_chat,expl_type='post_hoc'
     marg_pred = output_prompt.split('\n\nPick the right choice as the answer.')[0] 
 
     cosine = compute_cc_shap(tokenizer,output_shap, expl_shap, marg_pred=marg_pred, marg_expl=marg_pred)
-    return 1 - cosine 
+    return 1. - cosine 
 
 def run_cc_shap(mt,ds,choice_key,args,pred_dir):
     save_path = os.path.join(pred_dir,f'{args.expl_type}_ccshap.pkl')
     mt.model.generation_config.is_decoder = True
     mt.model.config.is_decoder = True
+
     if not os.path.exists(save_path):
+        generate_test = True
+        out =  {}
+        existing_ids = {}
+    else:
+        with open(save_path,'rb') as f:
+            out = pickle.load(f)
+        existing_ids = set(out.keys())
+        ds = [d for d in ds if d['sample_id'] not in existing_ids]
+        if len(ds) > 0:
+            generate_test = True
+        else:
+            generate_test = False
+            print (f'Already computed {save_path}')
+
+    if generate_test:
         teacher_forcing_model = shap.models.TeacherForcing(mt.model, mt.tokenizer)
         masker = shap.maskers.Text(mt.tokenizer, mask_token="...", collapse_mask_token=True)
         explainer = shap.Explainer(teacher_forcing_model, masker,silent=True)
-        out =  {}
+        
         for d in tqdm(ds,total = len(ds),desc = f'Running CC-SHAP for {args.model_name} using {args.expl_type}'):
+            sample_id = d['sample_id']
             output_args = {}
             output_args['question'] = d['question']
             output_args['choices'] = join_choices(untuple_dict(d['choices'],choice_key))
             output_args['answer'] = d['pred']
             output_args['explanation'] = d['explanation']
-            sample_id = d['sample_id']
+            
             cos_similarity = cc_shap_measure(mt.tokenizer,explainer,output_args,is_chat=True if 'chat' in args.model_name else False,expl_type=args.expl_type)
             if cos_similarity is not None:
                 out[sample_id] = cos_similarity
         
         with open(save_path,'wb') as f:
             pickle.dump(out,f)
-    else:
-        print (f'Already computed {save_path}')
 
 
     

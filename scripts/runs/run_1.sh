@@ -12,46 +12,20 @@ bs=32
 num_samples=100
 corrupted_samples=5
 expl_type='cot'
-model_name='llama3-8B-chat'
+model_name='gemma-2B'
 metric=causal
 faithfulness_type=input_output_p
-dataset_name='esnli'
+dataset_name='arc'
 
-for expl_type in post_hoc cot
-do
-  for seed in 0 1 2
-  do
-    python get_known_ds.py \
-    --dataset_name $dataset_name \
-    --num_samples $num_samples \
-    --batch_size $bs \
-    --corrupted_samples $corrupted_samples \
-    --expl_type $expl_type \
-    --model_name $model_name \
-    --seed $seed
-  done
-  
+python main.py \
+--dataset_name $dataset_name \
+--num_samples $num_samples \
+--batch_size $bs \
+--corrupted_samples $corrupted_samples \
+--expl_type cot \
+--model_name $model_name \
+--metric $metric \
+--faithfulness_type $faithfulness_type \
+--num_seed 1
 
-  python main.py \
-  --dataset_name $dataset_name \
-  --num_samples $num_samples \
-  --batch_size $bs \
-  --corrupted_samples $corrupted_samples \
-  --expl_type $expl_type \
-  --model_name $model_name \
-  --metric $metric \
-  --faithfulness_type $faithfulness_type \
-  
-  # cc shap
-  python main.py \
-  --dataset_name $dataset_name \
-  --num_samples $num_samples \
-  --batch_size $bs \
-  --corrupted_samples $corrupted_samples \
-  --expl_type $expl_type \
-  --model_name $model_name \
-  --metric cc_shap \
-  --faithfulness_type $faithfulness_type \
-  
-done
 

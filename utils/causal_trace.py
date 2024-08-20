@@ -47,11 +47,11 @@ def trace_with_patch(
     Thus num_samples (the number of corrupted duplicated samples) is used to gauge where's the next sample.
     """
 
-    rs = numpy.random.RandomState(1)  # For reproducibility, use pseudorandom noise
+    # rs = numpy.random.RandomState(1)  # For reproducibility, use pseudorandom noise
     if uniform_noise:
-        prng = lambda *shape: rs.uniform(-1, 1, shape)
+        prng = lambda *shape: numpy.random.uniform(-1, 1, shape)
     else:
-        prng = lambda *shape: rs.randn(*shape)
+        prng = lambda *shape: numpy.random.randn(*shape)
 
     nb = (inp.shape[0]-1)//num_samples
 
@@ -239,7 +239,7 @@ def calculate_hidden_flow(
     input_until = None,
     batch_size = 32,
     use_kv_caching = True, # use it for sequential outputs to save computation (should set to fp16 or 32),
-    scores = None,
+    scores = {},
     use_fs = False, # if use_fs need to ensure find_token_range args find_sub_range is True
     average_sequence = True, # if cot, we dont average over the sequences.
 ):
@@ -271,37 +271,37 @@ def calculate_hidden_flow(
 
     final_input_tokens = [decode_tokens(mt.tokenizer, inp[0])[j] for j in token_range]
     
-    
-    low_score_store = []
-
     ## Low score (No patching) ##
     low_score_inp = deepcopy(inp)
 
     ## if using gemma2, we need to define a cache (issue with the current transformers)
-    if 'gemma2' in mt.model_name:
+    if 'gemma2-' in mt.model_name:
         past_kv_cache = HybridCache(config=mt.model.config,
                                    max_batch_size=low_score_inp.shape[0], 
-                                  max_cache_len=2048,
-                                  dtype = torch.bfloat16
+                                  max_cache_len=low_score_inp.shape[-1] + len(answer_t),
+                                  dtype = mt.model.dtype,
+                                  device = low_score_inp.device
                                   )
         cache_position = torch.arange(low_score_inp.shape[1],dtype = torch.int32).to(low_score_inp.device)
         low_past_kv = (past_kv_cache,cache_position)
     else:
         low_past_kv = None # DO KV CACHEING FOR EFFICIENCY
     
-    if scores is None:
+    low_score_store = []
+    if 'low_score' not in scores:
         for ans_token in answer_t:
             low_score,low_past_kv = trace_with_patch(
                 mt.model, low_score_inp, [], ans_token, e_range, noise=noise, uniform_noise=uniform_noise,past_kv = low_past_kv if use_kv_caching and len(answer_t) > 1 else None,num_samples = samples)
             low_score_inp = torch.tensor(ans_token).repeat(low_score_inp.shape[0],1).to(low_score_inp.device)
             low_score_store.append(low_score.item())
-        base_score = generate_sequence_probs(inp[:1],mt,answer_t,return_type = 'mean' if average_sequence else None)
-        if 'gemma2' in mt.model_name:
-            del low_past_kv
-            torch.cuda.empty_cache()
-
     else:
         low_score_store = scores['low_score']
+        
+    if 'high_score' not in scores:
+        base_score = generate_sequence_probs(inp[:1],mt,answer_t,return_type = 'mean' if average_sequence else None)
+        if 'gemma2' in mt.model_name:
+            low_past_kv[0].reset()
+    else:
         base_score = scores['high_score']
 
 
@@ -316,7 +316,7 @@ def calculate_hidden_flow(
     ## Patching ##
     differences = trace_important_states(
         mt.model,
-        mt.num_layers,
+        mt.num_layers if '70b' not in mt.model_name.lower() else range(0,mt.num_layers,10),
         inp,
         e_range,
         answer_t,
@@ -392,8 +392,9 @@ def trace_important_states(
             if 'gemma-2-' in model.name_or_path:
                 past_kv_cache = HybridCache(config=model.config,
                                         max_batch_size=inp_rolled.shape[0], 
-                                        max_cache_len=2048,
-                                        dtype = torch.bfloat16
+                                        max_cache_len=inp_rolled.shape[-1] + len(answer_t),
+                                        dtype = model.dtype,
+                                        device = model.device
                                         )
                 cache_position = torch.arange(inp_rolled.shape[1],dtype = torch.int32).to(inp_rolled.device)
                 past_kv = (past_kv_cache,cache_position)
@@ -423,8 +424,8 @@ def trace_important_states(
 
         table.append(torch.stack(all_r).T)
         if 'gemma-2-' in model.name_or_path and past_kv is not None:
-            del past_kv
-            torch.cuda.empty_cache()  # Optionally clear CUDA cache if using GPU
+            past_kv[0].reset()
+            # torch.cuda.empty_cache()  # Optionally clear CUDA cache if using GPU
     
     table = torch.cat(table,dim = 0)
     table = table.view(len(token_range),num_layers,len(answer_t))
@@ -575,15 +576,30 @@ def find_subject_range(token_array):
     return total_tokens_traversed # return back total tokens traversed from the back. ,ie end of key1
 
 def generate_sequence_probs(inps,mt,answers,return_type = 'mean'):
-    kv = None
+    if 'gemma2-' in mt.model_name:
+        kv = HybridCache(config=mt.model.config,
+                                max_batch_size=inps.shape[0], 
+                                max_cache_len=inps.shape[-1] + len(answers),
+                                dtype = mt.model.dtype,
+                                device = inps.device
+                                )
+        cache_position = torch.arange(inps.shape[1],dtype = torch.int32).to(inps.device)
+    else:
+        kv = None
     base_score = []
     for a in answers:
         with torch.no_grad():
-            out = mt.model(inps,use_cache=True,past_key_values = kv)
-        kv = out.past_key_values
+            if 'gemma2-' in mt.model_name:
+                out = mt.model(inps,use_cache=True,past_key_values = kv,cache_position =cache_position)
+                cache_position = cache_position[-1:] + 1
+            else:
+                out = mt.model(inps,use_cache=True,past_key_values = kv)
+                kv = out.past_key_values
         probs = torch.softmax(out.logits[0,-1],dim= 0)[a]
         inps = torch.tensor(a).repeat(inps.shape[0],1).to(inps.device)
         base_score.append(probs.item())
+    if 'gemma2-' in mt.model_name:
+        kv.reset()
     if return_type == 'mean':
         return numpy.mean(base_score)
     else:

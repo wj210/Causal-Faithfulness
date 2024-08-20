@@ -7,13 +7,13 @@ module load cuda11.7/blas
 
 export OMP_NUM_THREADS=8
 # The required free memory in MiB
-REQUIRED_MEMORY=40000  # For example, 70 GB
+REQUIRED_MEMORY=39000  # For example, 70 GB
 REQUIRED_GPUS=1    # Number of GPUs needed
 
 p=PA100q
 w=node03
 # p=RTXA6Kq
-# w=node08
+# w=node09
 c=4 # num cpus
 
 # This array will hold the PIDs of the Python sub-scripts
@@ -101,7 +101,7 @@ allocate_gpu_memory() {
 
 allocate_gpu_memory
 
-srun -p $p -w $w -c $c --verbose --job-name=self_learning --gpus=$num_gpu bash scripts/runs/run_5.sh
+srun -p $p -w $w -c $c --verbose --job-name=self_learning --gpus=$num_gpu bash scripts/runs/run_8.sh
 
 
 
