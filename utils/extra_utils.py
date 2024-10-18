@@ -1,5 +1,4 @@
 import torch
-from torch.nn.utils.rnn import pad_sequence
 import torch.utils
 import re
 import time
@@ -118,6 +117,46 @@ def filter_samples(ds):
             out_ds.append(d)
     return out_ds
 
+
+def decode_tokens(tokenizer, token_array):
+    if hasattr(token_array, "shape") and len(token_array.shape) > 1:
+        return [decode_tokens(tokenizer, row) for row in token_array]
+    return [tokenizer.decode([t]) for t in token_array]
+
+def find_token_range_2(token_array, substring,tokenizer,allow_lowercase=True):
+    if not isinstance(token_array[0],str): # can either be input_ids or decoded list of tokens
+        toks = decode_tokens(tokenizer, token_array)
+    else:
+        toks = token_array
+    toks = [t.strip() for t in toks] # get rid of spaces just in case there are any
+    whole_string = "".join(toks)
+    substring = "".join([s.strip() for s in substring.split()]) # to standardize no spaces
+    if allow_lowercase:
+        whole_string = whole_string.lower()
+        substring = substring.lower()
+    if substring not in whole_string:
+        return None, None
+    char_loc = whole_string.index(substring)
+    loc = 0
+    tok_start, tok_end = None, None
+    for i, t in enumerate(toks):
+        loc += len(t)
+        if tok_start is None and loc > char_loc:
+            tok_start = i
+        if tok_end is None and loc >= char_loc + len(substring):
+            tok_end = i + 1
+            break
+    return (tok_start, tok_end)
+
+def sort_by_earliest_subject(ds,tokenizer):
+    tokenized_inputs = [([tokenizer.decode([t]) for t in tokenizer.encode(d['question'],add_special_tokens=False)],d['subject']) for d in ds]
+    start_end_pos = [find_token_range_2(t[0],t[1],tokenizer)[0] for t in tokenized_inputs]
+    sorted_idx = sorted(range(len(start_end_pos)), key=lambda k: start_end_pos[k])
+    sorted_ds = [ds[i] for i in sorted_idx]
+    return sorted_ds
+    
+
+
 def top_n_indices(tensor, N):
     flattened_tensor = tensor.flatten()
     top_n_values, top_n_indices_flat = torch.topk(flattened_tensor, N)
@@ -142,10 +181,10 @@ def tokenize_single_answer(x,tokenizer,model_name):
         return tokenizer.encode('\n'+x,add_special_tokens=False)[2:][0] # other models have leading char infront. remove it
 
 def cal_cost(model_name,in_tokens,out_tokens):
-    if model_name == 'gpt-4':
+    if model_name in ['gpt-4','GPT4']:
         cost = in_tokens * (10/1e6) + (out_tokens * (30/1e6))
-    elif model_name == 'gpt-4o':
-        cost = in_tokens * (5/1e6) + (out_tokens * (15/1e6))
+    elif model_name in ['gpt-4o','GPT4o']:
+        cost = in_tokens * (2.5/1e6) + (out_tokens * (10/1e6))
     elif model_name == 'gpt-3.5-turbo-0125':
         cost = in_tokens * (0.5/1e6) + (out_tokens * (1.5/1e6))
     elif model_name == 'gpt-3.5-turbo-instruct':
@@ -164,7 +203,8 @@ def async_process(fn,inps,workers=10,msg=''):
 
 def openai_call(message,model,max_tokens,temperature=0.,n=1):
     client = OpenAI()
-    max_calls = 5
+
+    max_calls = 1
     num_calls = 0
     while True:
         if num_calls > max_calls:
@@ -204,7 +244,7 @@ def openai_call(message,model,max_tokens,temperature=0.,n=1):
         except Exception as e:
             num_calls += 1
             time.sleep(num_calls**2)
-            print(f'Failing Openai call due to {e}, remaining calls: {max_calls - num_calls}')
+            # print(f'Failing Openai call due to {e}, remaining calls: {max_calls - num_calls}')
 
 
 def get_common_samples(paths,type_):
@@ -232,6 +272,16 @@ def get_common_samples(paths,type_):
 
 def remove_punctuations(s):
     return re.sub(r'[^\w\s]','',s)
+
+def reorder_dict(dicts):
+    out = []
+    keys = ['question','cf_question','subject','cf_subject','answer','cf_answer','choices','valid']
+    for d in dicts:
+        new_d = {}
+        for k in keys:
+            new_d[k] = d[k]
+        out.append(new_d)
+    return out
 
 
 

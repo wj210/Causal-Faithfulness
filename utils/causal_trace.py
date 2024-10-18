@@ -48,16 +48,26 @@ def trace_with_patch(
     """
 
     # rs = numpy.random.RandomState(1)  # For reproducibility, use pseudorandom noise
-    if uniform_noise:
-        prng = lambda *shape: numpy.random.uniform(-1, 1, shape)
-    else:
-        prng = lambda *shape: numpy.random.randn(*shape)
+    if isinstance(noise, float) or isinstance(noise,int): 
+        if uniform_noise:
+            prng = lambda *shape: numpy.random.uniform(-1, 1, shape)
+        else:
+            prng = lambda *shape: numpy.random.randn(*shape)
+        # Define the model-patching rule.
+        if isinstance(noise, float):
+            noise_fn = lambda x: noise * x
+        else:
+            noise_fn = noise
+        noise_data = None
+    else: # we use similar noise for similar samples
+        prng = None
+        noise_data = torch.from_numpy(noise).unsqueeze(0).repeat(num_samples,1,1).to(inp.device)
 
     nb = (inp.shape[0]-1)//num_samples
 
     # patch_spec = defaultdict(list)
     patch_spec = []
-    for t, l in states_to_patch:
+    for t, l in states_to_patch: # here if multiple tokens
         pc = defaultdict(list)
         pc[l].append(t)
         patch_spec.append(pc)
@@ -72,12 +82,6 @@ def trace_with_patch(
 
     def untuple(x):
         return x[0] if isinstance(x, tuple) else x
-
-    # Define the model-patching rule.
-    if isinstance(noise, float):
-        noise_fn = lambda x: noise * x
-    else:
-        noise_fn = noise
 
     
     if 'gemma-2-' in model.name_or_path: # gemma2 requires the cache position to be passed
@@ -98,15 +102,13 @@ def trace_with_patch(
             # If requested, we corrupt a range of token embeddings on batch items x[1:]
             if tokens_to_mix is not None:
                 b, e = tokens_to_mix
-                noise_data = [noise_fn(
-                    torch.from_numpy(prng(num_samples, e - b, x.shape[2]))
-                ).to(x.device) for _ in range(nb)] # get a random noise for each corrupted sample
-
-                for ni,i in enumerate(range(1,x.shape[0],num_samples)): # use diff noise for diff sample
+                # if not noise_data:
+                #     noise_data = noise_fn(torch.from_numpy(prng(num_samples, e - b, x.shape[2]))).to(x.device)
+                for i in range(1,x.shape[0],num_samples): # use diff noise for diff sample
                     if replace:
-                        x[i:i+num_samples, b:e] = noise_data[ni]
+                        x[i:i+num_samples, b:e] = noise_data
                     else:
-                        x[i:i+num_samples, b:e] += noise_data[ni]
+                        x[i:i+num_samples, b:e] += noise_data
             return x
         # if layer not in patch_spec:
         if all([layer not in pc for pc in patch_spec]):
@@ -143,20 +145,24 @@ def trace_with_patch(
                 outputs_exp = model(inp,use_cache = True)
             out_kv = outputs_exp.past_key_values
 
-    # We report softmax probabilities for the answers_t token predictions of interest. # average across all corrupted runs
+    # We report softmax probabilities and logit for the answers_t token predictions of interest. # average across all corrupted runs 
     probs = []
+    logits = []
     for j in range(1,outputs_exp.logits.shape[0],num_samples):
-        probs.append(torch.softmax(outputs_exp.logits[j:j+num_samples, -1, :], dim=1).mean(dim=0)[answers_t])
+        curr_sample_logits = outputs_exp.logits[j:j+num_samples, -1, :]
+        probs.append(torch.softmax(curr_sample_logits, dim=1).mean(dim=0)[answers_t])
+        logits.append(curr_sample_logits.mean(dim=0)[answers_t])
     probs = torch.stack(probs)
+    logits = torch.stack(logits)
 
     # If tracing all layers, collect all activations together to return.
     if trace_layers is not None:
         all_traced = torch.stack(
             [untuple(td[layer].output).detach().cpu() for layer in trace_layers], dim=2
         )
-        return probs, all_traced, out_kv
+        return probs,logits, all_traced, out_kv
 
-    return probs, out_kv
+    return probs,logits, out_kv
 
 
 def trace_with_repatch(
@@ -230,18 +236,10 @@ def calculate_hidden_flow(
     subject,
     samples=10,
     noise=0.1,
-    token_range=None,
-    uniform_noise=False,
-    replace=False,
     window=10,
-    kind=None,
     answer = None, # if answer provided, no need to predict again,
     input_until = None,
     batch_size = 32,
-    use_kv_caching = True, # use it for sequential outputs to save computation (should set to fp16 or 32),
-    scores = {},
-    use_fs = False, # if use_fs need to ensure find_token_range args find_sub_range is True
-    average_sequence = True, # if cot, we dont average over the sequences.
 ):
     """
     Runs causal tracing over every token/layer combination in the network
@@ -252,26 +250,24 @@ def calculate_hidden_flow(
         inp = torch.stack([torch.tensor(mt.tokenizer.encode(p)) for p in [prompt]* (samples + 1)],dim = 0).to(mt.model.device)
     else:
         inp  = prompt.repeat(samples+1,1).to(mt.model.device)
-    e_range = find_token_range(mt.tokenizer, inp[0], subject,find_sub_range = use_fs) # find pos of the subject in the input prompt
+    e_range = find_token_range(mt.tokenizer, inp[0], subject,include_chat_template = mt.is_chat,find_sub_range=not mt.is_chat) # find pos of the subject in the input prompt
     token_range = range(e_range[0],inp.shape[1]) # replacing the previous tokens are pointless.
-
     if len(answer) == 1: # for explanation
         answer_t = tokenize_single_answer(answer,mt.tokenizer,mt.model_name)
     else:
         answer_t = mt.tokenizer.encode(answer,add_special_tokens=False)
     if not isinstance(answer_t,list):
         answer_t = [answer_t]
-
     if input_until is not None: # exclude the last part of the prompt after choices
         if isinstance(input_until,str):
-            input_range = find_token_range(mt.tokenizer, inp[0], input_until,find_sub_range = use_fs)
+            input_range = find_token_range(mt.tokenizer, inp[0], input_until,include_chat_template = mt.is_chat,find_sub_range=not mt.is_chat)
             token_range = range(e_range[0],input_range[0]) 
         else:
             token_range = range(e_range[0],e_range[0]+ input_until)
-
     final_input_tokens = [decode_tokens(mt.tokenizer, inp[0])[j] for j in token_range]
     
-    ## Low score (No patching) ##
+
+    ## Low score (No patching) ## #TODO Change here
     low_score_inp = deepcopy(inp)
 
     ## if using gemma2, we need to define a cache (issue with the current transformers)
@@ -383,7 +379,7 @@ def trace_important_states(
             pos_to_edit.append((tnum, layername(model, layer)))
     
     for i in range(0,len(pos_to_edit),batch_size):
-        take_size = batch_size if i+batch_size <= len(pos_to_edit) else len(pos_to_edit) - i
+        take_size = min(batch_size,len(pos_to_edit) - i)
         ## for batch, we only repeat 1: onwards, 0 is the clean input
         inp_rolled = inp[1:].repeat(take_size,1)
         inp_rolled = torch.cat([inp[:1],inp_rolled],dim = 0)
@@ -516,22 +512,32 @@ def decode_tokens(tokenizer, token_array):
     return [tokenizer.decode([t]) for t in token_array]
 
 
-def find_token_range(tokenizer, token_array, substring,allow_lowercase=True,find_sub_range=False):
+def find_token_range(tokenizer, token_array, substring,allow_lowercase=True,find_sub_range=False,return_individual_pos = False,include_chat_template = False):
     """
     Note in few_shot, there might be repeatable subject tokens. They key here is to find a restricted frame.
+    if return_individual_pos: (use for STR)
+    returns the position for each word in the substring (one word may span multiple tokens) thus end result shld be [start of 1st word, start of 2nd word, ...]
+    add the start of the next word outside of substring to get the end of the last word as we will index later as [start of word :end of next word]
     """
     if not isinstance(token_array[0],str): # can either be input_ids or decoded list of tokens
         toks = decode_tokens(tokenizer, token_array)
     else:
         toks = token_array
     toks = [t.strip() for t in toks] # get rid of spaces just in case there are any
-    if find_sub_range:
+
+    ## IF chat template, some of it might mess with the char_loc starting point. thus we exclude it out
+    tok_to_start_from = 0
+    if include_chat_template: # TODO ** THIS IS ONLY SUPPORTED FOR GEMMA, NEED TO CHANGE FOR OTHER MODELS (check how many of the starting tokens are for chat template)
+        tok_to_start_from = 4
+    if find_sub_range: # For now only for non-chat.
         tok_to_start_from = find_subject_range(toks)
-    else:
-        tok_to_start_from = 0
+
     toks = toks[tok_to_start_from:]
     whole_string = "".join(toks)
-    substring = "".join([s.strip() for s in substring.split()]) # to standardize no spaces
+    sep_substring = [s.strip() for s in substring.split()]
+    substring = "".join(sep_substring) # to standardize no spaces
+    substring_pos = [[] for _ in sep_substring] # keep track of each substring pos
+    
     if allow_lowercase:
         whole_string = whole_string.lower()
         substring = substring.lower()
@@ -539,16 +545,34 @@ def find_token_range(tokenizer, token_array, substring,allow_lowercase=True,find
         return None, None
     char_loc = whole_string.index(substring)
     loc = 0
-    tok_start, tok_end = None, None
-    for i, t in enumerate(toks):
-        loc += len(t)
-        if tok_start is None and loc > char_loc:
-            tok_start = i
-        if tok_end is None and loc >= char_loc + len(substring):
-            tok_end = i + 1
-            break
-    return (tok_start+tok_to_start_from, tok_end+tok_to_start_from)
+    if not return_individual_pos:
+        tok_start, tok_end = None, None
+        for i, t in enumerate(toks):
+            loc += len(t)
+            if tok_start is None and loc > char_loc:
+                tok_start = i
+            if tok_end is None and loc >= char_loc + len(substring):
+                tok_end = i + 1
+                break
+        return (tok_start+tok_to_start_from, tok_end+tok_to_start_from)
+    else: 
+        next_word_start = char_loc
+        word_c = 0
+        for i, t in enumerate(toks):
+            loc += len(t)
+            if loc > next_word_start:
+                substring_pos[word_c].append(i)
+                if loc >= next_word_start + len(sep_substring[0]):
+                    next_word_start += len(sep_substring[0])
+                    sep_substring.pop(0)
+                    word_c +=1
+                if len(sep_substring) == 0:
+                    break
+            elif word_c > 0 and len(substring_pos[word_c-1]) > 0:
+                substring_pos[word_c-1].append(i)
+        return substring_pos
 
+            
 def find_subject_range(token_array):
     """
     Given a text, use a common key to filter out unwanted text
@@ -575,7 +599,7 @@ def find_subject_range(token_array):
         joined_token_array = "".join(token_array)
     return total_tokens_traversed # return back total tokens traversed from the back. ,ie end of key1
 
-def generate_sequence_probs(inps,mt,answers,return_type = 'mean'):
+def generate_sequence_probs(inps,mt,answers,return_type = None):
     if 'gemma2-' in mt.model_name:
         kv = HybridCache(config=mt.model.config,
                                 max_batch_size=inps.shape[0], 
@@ -586,7 +610,7 @@ def generate_sequence_probs(inps,mt,answers,return_type = 'mean'):
         cache_position = torch.arange(inps.shape[1],dtype = torch.int32).to(inps.device)
     else:
         kv = None
-    base_score = []
+    base_score,base_probs = [], []
     for a in answers:
         with torch.no_grad():
             if 'gemma2-' in mt.model_name:
@@ -595,19 +619,20 @@ def generate_sequence_probs(inps,mt,answers,return_type = 'mean'):
             else:
                 out = mt.model(inps,use_cache=True,past_key_values = kv)
                 kv = out.past_key_values
-        probs = torch.softmax(out.logits[0,-1],dim= 0)[a]
+        logits = out.logits[0,-1]
+        probs = torch.softmax(logits,dim= 0)[a]
         inps = torch.tensor(a).repeat(inps.shape[0],1).to(inps.device)
-        base_score.append(probs.item())
+        base_score.append(logits[a].item())
+        base_probs.append(probs.item())
     if 'gemma2-' in mt.model_name:
         kv.reset()
     if return_type == 'mean':
-        return numpy.mean(base_score)
+        return numpy.mean(base_probs),numpy.mean(base_score)
     else:
-        return numpy.array(base_score)
+        return numpy.array(base_probs),numpy.array(base_score)
 
 def collect_embedding_std(mt, subjects):
     alldata = []
-    from tqdm import tqdm
     for s in subjects:
         inp = make_inputs(mt.tokenizer, [s])
         with nethook.Trace(mt.model, layername(mt.model, 0, "embed")) as t:
@@ -649,4 +674,7 @@ def add_extra_tokens_to_subject(subject,prompt,tokenizer,add = 1,direction='fron
 
 
 # if __name__ == "__main__":
-#     main()
+    
+
+
+

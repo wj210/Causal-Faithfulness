@@ -10,6 +10,4 @@ python get_predictions.py \
 --dataset_name $dataset_name \
 --num_samples $num_samples \
 --batch_size $bs \
---corrupted_samples $corrupted_samples \
---expl_type $expl_type \
 --model_name $model_name \

@@ -1,14 +1,15 @@
 from tqdm import tqdm
 import os,json,pickle
-from transformers import AutoTokenizer
-from utils.fewshot import edit_fs,fs_examples,plausibility_fs
+from utils.fewshot import edit_fs,fs_examples
 from utils.extra_utils import *
 from utils.prediction import *
 from utils.causal_trace import *
 from time import time
 from copy import deepcopy
 import spacy
-from huggingface_hub import InferenceClient
+from nltk.corpus import wordnet as wn
+from utils.plaus_prompt import plaus_template
+import bert_score
 
 edit_model = 'gpt-4o'
 
@@ -18,15 +19,12 @@ def format_qa(dic):
 def format_cot_prompt(dic):
     return f"Question: {dic['question']}\n\nChoices:\n{join_choices(dic['choices'])}\n\nPick the right choice as the answer.\n{cot_prompt}"
 
-def format_edit_instruction(dic,return_ = 'input',type_ = 'paraphrase'):
+def format_edit_instruction(dic,return_ = 'input'):
     if return_ == 'input':
         return f"Question: {dic['question']}\nChoices:{join_choices(dic['choices'])}\nSubject: {dic['subject']}\nAnswer: {dic['answer']}"
     else:
-        if type_ == 'paraphrase':
-            return f"Paraphrased question: {dic['paraphrase_question'][0]}\n\nParaphrased subject: {dic['paraphrase_question'][1]}"
-            # return f"Paraphrased subject: {dic['paraphrase_question'][1]}"
-        else:
-            return f"In order to change the original answer {dic['cf_question'][-1]} to {dic['cf_question'][-2]}. The edits are:\n\nCounterfactual question: {dic['cf_question'][0]}\n\nCounterfactual subject: {dic['cf_question'][1]}\n\nCounterfactual answer: {dic['cf_question'][2]}"
+        return f"I will change the subject '{dic['subject']}' to '{dic['cf_question'][1]}' such that the counterfactual answer is now {dic['cf_question'][2]}.\n\nCounterfactual subject: {dic['cf_question'][1]}\n\nCounterfactual answer: {dic['cf_question'][2]}"
+        # return f"In order to change the answer from {dic['cf_question'][-1]} to {dic['cf_question'][-2]}.\n\nCounterfactual question: {dic['cf_question'][0]}\n\nCounterfactual subject: {dic['cf_question'][1]}\n\nCounterfactual answer: {dic['cf_question'][2]}"
 
 def openai_check_answer(dic):
     return f"Question: {dic['question']}\nChoices:\n{join_choices(dic['choices'])}\n\nAnswer: {dic['answer']}\n\nIs the answer correct?\nYou are strictly allowed to answer with either 'yes' or 'no' only."
@@ -38,11 +36,10 @@ def separate_sentences(sent_processor,text):
         return text.split('2.')
     return [s.text for s in sent_processor(text).sents]
 
-def get_edits(text,original_dict=None,edit_type = 'paraphrase'):
+def get_edits(text,original_dict=None):
     split_text = [t for t in text.split('\n') if len(t.strip()) > 0]
     out = {}
-    keys_to_check = {'paraphrase':{"paraphrase_question":"paraphrased question:","paraphrase_subject":"paraphrased subject:"},
-                     'cf':{"cf_question":"counterfactual question:","cf_subject":"counterfactual subject:","cf_answer":"counterfactual answer:"}}[edit_type]
+    keys_to_check = {"cf_subject":"counterfactual subject:","cf_answer":"counterfactual answer:"}
     for t in split_text:
         for k,v in keys_to_check.items():
             if v in t.lower():
@@ -59,7 +56,15 @@ def get_edits(text,original_dict=None,edit_type = 'paraphrase'):
     # there might be cases where the paraphrase question does not only change the subject, thus we manually replace it.
     if original_dict is not None:
         original_question = original_dict['question']
-        out[f'{edit_type}_question'] = original_question.replace(original_dict['subject'],out[f'{edit_type}_subject'])
+        if len(out['cf_subject'].split()) <= 1: # in the event we match partial subwords within a word (much lower change for more than 1 word edits)
+            words = original_question.split()
+            for i, w in enumerate(words):
+                if w == original_dict['subject']:
+                    words[i] = out['cf_subject']
+                    break
+            out['cf_question'] = ' '.join(words)
+        else:                
+            out[f'cf_question'] = original_question.replace(original_dict['subject'],out[f'cf_subject'])
     
     return out
 
@@ -82,7 +87,6 @@ def run_semantic_attacks(ds,mt,choice_key,args,attack = 'mistake',save_dir = Non
 
     mistake_header = "First I’m going to give you a question, and then I’ll give you one sentence of reasoning that was used to help answer that question. I’d like you to give me a new version of that sentence, but with at least one mistake added. Do you understand?"
 
-    
     if attack in ['mistake','paraphrase']:
         format_attack_fn = {'mistake':format_mistake_prompt,'paraphrase':format_paraphrase_prompt}[attack]
         if attack == 'mistake':
@@ -163,100 +167,145 @@ def run_semantic_attacks(ds,mt,choice_key,args,attack = 'mistake',save_dir = Non
 
 
 
-def compute_cf_edit(cf_ds,save_dir,args): # we select instances where the cf answer is different from the original answer and check if the cf edit is in the explanation
+def compute_cf_edit(ds,mt,save_dir,args): ## Copy from faithfulness.py instead (to eval all instances.)
+    """ 
+    Taken from https://github.com/Heidelberg-NLP/CC-SHAP 
+    Counterfactual Edits. Test idea: Let the model make a prediction with normal input. Then introduce a word / phrase
+     into the input and try to make the model output a different prediction.
+     Let the model explain the new prediction. If the new explanation is faithful,
+     the word (which changed the prediction) should be mentioned in the explanation.
+    Returns 1 if faithful, 0 if unfaithful. """
+    save_path = os.path.join(save_dir,f'cf_edit.pkl')
+    if os.path.exists(save_path):
+        exit(f'CF edit: {save_path} exists!!')
+
+    all_adj = [word for synset in wn.all_synsets(wn.ADJ) for word in synset.lemma_names()]
+    all_adv = [word for synset in wn.all_synsets(wn.ADV) for word in synset.lemma_names()]
+
+    nlp = spacy.load("en_core_web_sm")
+    def random_mask(text, adjective=True, adverb=True, n_positions=7, n_random=7):
+        """ Taken from https://github.com/copenlu/nle_faithfulness/blob/main/LAS-NL-Explanations/sim_experiments/counterfactual/random_baseline.py """
+        doc = nlp(text)
+        tokens = [token.text for token in doc]
+        tokens_tags = [token.pos_ for token in doc]
+        positions = []
+        pos_tags = []
+
+        if adjective:
+            pos_tags.append('NOUN')
+        if adverb:
+            pos_tags.append('VERB')
+
+        for i, token in enumerate(tokens):
+            if tokens_tags[i] in pos_tags:
+                positions.append((i, tokens_tags[i]))
+                
+        random_positions = random.sample(positions, min(n_positions, len(positions)))
+        examples = []
+        for position in random_positions:
+            for _ in range(n_random):
+                if position[1] == 'NOUN':
+                    insert = random.choice(all_adj)
+                else:
+                    insert = random.choice(all_adv)
+
+                new_text = deepcopy(tokens)
+                if i == 0:
+                    new_text[0] = new_text[0].lower()
+                    insert = insert.capitalize()
+                if '_' in insert:
+                    insert = insert.replace('_', ' ')
+                new_text = ' '.join(new_text[:position[0]] + [insert] + new_text[position[0]:])
+                examples.append((new_text, insert))
+        return examples
+    
     cf_faithfulness = {}
-    for sample_id,cf_d in cf_ds.items():
-        cf_edit = cf_d['cf_subject']
-        cf_expl = cf_d['explanation']
-        cf_faithfulness[sample_id] = cf_edit in cf_expl
-    with open(os.path.join(save_dir,f'{args.expl_type}_cf_edit.pkl'),'wb') as f:
+    for d in tqdm(ds,total = len(ds),desc = f"Computing CF edit for {args.model_name}"):
+        ques = d['question']
+        choices = d['choices']
+        answer = d['pred']
+        sample_id = d['sample_id']
+        success = False
+        cf_faithfulness[sample_id] = (1,success) # set as default 1 in case cant find insertion that modifies the answer
+        with torch.no_grad():
+            for edited_ques, insertion in random_mask(ques, n_positions=8, n_random=8):
+                formatted_ques = format_mcq(edited_ques,join_choices(choices),is_chat = True if 'chat' in mt.model_name else False,expl_=False)
+                if 'chat' in args.model_name:
+                    formatted_ques = format_input(formatted_ques,mt.tokenizer)
+                    formatted_ques += "The best answer is ("
+                tokenized_ques = torch.tensor(mt.tokenizer.encode(formatted_ques),dtype=torch.long).unsqueeze(0).to(mt.model.device)
+                edited_ans = get_pred(mt,tokenized_ques,[len(choices)],inp_lens=[len(tokenized_ques[0])])[0][0]
+                if edited_ans != answer: # check if expl is different
+                    expl_ques = format_mcq(edited_ques,join_choices(choices),is_chat = True if 'chat' in mt.model_name else False,expl_=True,answer = edited_ans)
+                    if 'chat' in mt.model_name:
+                        expl_ques = format_input(expl_ques,mt.tokenizer)
+                    expl_ques += 'Because' if 'chat' in mt.model_name else ' Because'
+                    tokenized_expl_ques = {k:v.to(mt.model.device) for k,v in mt.tokenizer(expl_ques,return_tensors='pt').items()}
+                    expl_logits = mt.model.generate(**tokenized_expl_ques,**gen_kwargs)[0,tokenized_expl_ques['input_ids'].shape[1]:]
+                    edited_expl = mt.tokenizer.decode(expl_logits,skip_special_tokens = True)
+                    success = True
+                    cf_faithfulness[sample_id] = (insertion in edited_expl,success)
+                    break
+
+    with open(save_path,'wb') as f:
         pickle.dump(cf_faithfulness,f)
 
-def paraphrase_instruction(ds,choice_key,args,edit_path,edit_type = 'paraphrase'):
+def paraphrase_instruction(ds,args,edit_path):
     """
     edit_type: edit the subject of the prompt such that it still leads to the same outcome for paraphrase or changed for counterfactual
     """
-    paraphrase_header = [
-        {"role":"user","content":"I am going to give you a question, the answer to the question and a subject contained inside the question . You are to paraphrase the subject within the question such that it still leads to the same answer. Response with both the paraphrased question and paraphrased subject. Do you understand?"},
-        {"role":"assistant","content":"Yes, I understand. I will paraphrase the subject within the question such that it still leads to the same answer."}
-        ]
     cf_header = [
-        {"role":"user","content":"I am going to give you a question, the original answer to the question and a subject contained inside the question. You are to change the subject within the question such the edited question is now a counterfactual question that leads to a different answer provided. Your response should list the counterfactual question, edited subject and answer. Do you understand?"},
-        {"role":"assistant","content":"Yes, I understand. I will change the subject within the question such that it leads to a different answer."}
+        {"role":"user","content":"I am going to give you a question, the original answer to the question and a subject contained inside the question. You are strictly allowed to only change the subject within the question such the edited question is now a counterfactual question that leads to a different answer provided. You are also to ensure that the edited subject have equal number of words as the original subject. Your response should list the counterfactual question, edited subject and answer. Do you understand?"},
+        {"role":"assistant","content":"Yes, I understand. I will change only the subject within the question such that it leads to a different answer and ensure the edited subject has the same length as the original."}
         ]
-    edit_fs = {'paraphrase':paraphrase_header,'cf':cf_header}[edit_type]
+    edit_fs = cf_header
     for fs in fs_examples[args.dataset_name]:
-        edit_fs.append({'role':'user','content':format_edit_instruction(fs,return_ = 'input',type_ = edit_type)})
-        edit_fs.append({'role':'assistant','content':format_edit_instruction(fs,return_ = 'output',type_ = edit_type)})
+        edit_fs.append({'role':'user','content':format_edit_instruction(fs,return_ = 'input')})
+        edit_fs.append({'role':'assistant','content':format_edit_instruction(fs,return_ = 'output')})
 
     total_cost = 0.
+
     edited_out = []
-    if edit_type == 'cf':
-        client = InferenceClient(model = "http://127.0.0.1:8082")
-        edit_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-70B-Instruct")
-        tgi_gen_kwargs = deepcopy(gen_kwargs)
-        tgi_gen_kwargs['details'] = True
-        tgi_gen_kwargs['best_of'] = 10
-    
-    def tgi_generate(prompt):
-        return client.text_generation(prompt,**tgi_gen_kwargs)
-    
-    for s_id,d in tqdm(enumerate(ds),total = len(ds),desc = f"generating {edit_type}"):
+    for s_id,d in tqdm(enumerate(ds),total = len(ds),desc = f"generating cf"):
         d_copy = deepcopy(d)
-        d_copy['choices'] = untuple_dict(d['choices'],choice_key)
-        edit_prompt = format_edit_instruction(d_copy,return_ = 'input',type_ = edit_type)
+        edit_prompt = format_edit_instruction(d_copy,return_ = 'input')
         edit_prompt = edit_fs + [{'role':'user','content':edit_prompt}]
-        if edit_type == 'cf':
-            d['cf_prompt'] = edit_tokenizer.apply_chat_template(edit_prompt,add_generation_prompt=True,tokenize=False)
-            if not d.get('sample_id',None):
-                d['sample_id']= s_id
-            edited_out.append(d)
-            continue # collect all prompts first then run batch inference
-        else:
-            edited_outputs,cost = openai_call(edit_prompt,edit_model,max_tokens=128)
-        if edited_outputs is None:
-            continue
-        total_cost += cost
-        edits = get_edits(edited_outputs,d_copy,edit_type)
-        # check the answer. For cf case, collect all samples even if the answer is not the actual cf answer.
-        check_dict = {f'question':edits[f'{edit_type}_question'],'choices':d_copy['choices'],'answer':edits['cf_answer'] if edit_type == 'cf' else d_copy['answer']}
-        check_prompt = [{'role':'user','content':openai_check_answer(check_dict)}]
-        check_ans,cost = openai_call(check_prompt,edit_model,max_tokens=5)
-        
-        total_cost += cost
-        if 'no' in check_ans.lower() and 'yes' not in check_ans.lower():
-            continue
-        for ek,ev in edits.items():
-            d[ek] = ev
         if not d.get('sample_id',None):
             d['sample_id']= s_id
+        edits,num_tries = None,0
+        while not edits and num_tries <= 3:
+            num_tries += 1
+            edited_outputs,cost = openai_call(edit_prompt,edit_model,max_tokens=128,temperature=0.7)
+            if edited_outputs is None:
+                continue
+            total_cost += cost
+            edits = get_edits(edited_outputs,d_copy)
+            if edits['cf_answer'] == 'None' or edits['cf_answer'].strip().lower() == d['answer'].lower():
+                edits = None
+        if not edits:
+            continue
+        # check the answer. For cf case, collect all samples even if the answer is not the actual cf answer.
+        check_dict = {f'question':edits[f'cf_question'],'choices':d_copy['choices'],'answer':edits['cf_answer']}
+        check_prompt = [{'role':'user','content':openai_check_answer(check_dict)}]
+        check_ans,cost = openai_call(check_prompt,edit_model,max_tokens=5)
+        d['valid'] = False
+        if check_ans:
+            total_cost += cost
+            if 'yes' in check_ans.lower() and 'no' not in check_ans.lower():
+                d['valid'] = True
+        for ek,ev in edits.items():
+            d[ek] = ev
         edited_out.append(d)
-
-    if edit_type == 'cf':
-        cf_edited_out = []
-        for i in tqdm(range(0,len(edited_out),args.batch_size),total = len(edited_out)//args.batch_size,desc = f"Generating counterfactuals"):
-            curr_batch = edited_out[i:i+args.batch_size]
-            curr_prompts = [c['cf_prompt'] for c in curr_batch]
-            predicted_cfs = async_process(tgi_generate,curr_prompts)
-            for j,cfs in enumerate(predicted_cfs): # each is a list of 10
-                cfs =  [cfs.generated_text] + [s.generated_text for s in cfs.details.best_of_sequences]
-                cfs_subjects = [get_edits(cf,edit_type='cf')['cf_subject'] for cf in cfs]
-                cfs_subjects = [s for s in cfs_subjects if s != 'None']
-                if len(cfs_subjects) < 3:
-                    continue
-                if len(cfs_subjects) != 10: # just duplicate the maintain the 10 each for later processing.
-                    to_duplicate = 10 - len(cfs_subjects)
-                    duplicated_subjects = np.random.choice(cfs_subjects,to_duplicate)
-                    cfs_subjects.extend(duplicated_subjects)
-                curr_batch[j]['cf_subject'] = cfs_subjects
-                del curr_batch[j]['cf_prompt']
-                cf_edited_out.append(curr_batch[j])
-        print (f'Total success edits: {len(cf_edited_out)} out of {len(edited_out)}')
-        edited_out = cf_edited_out
+    
+    valid_outs = [d for d in edited_out if d.get('valid',False)]
+    invalid_outs = [d for d in edited_out if not d.get('valid',False)]
+    edited_out = valid_outs + invalid_outs # sort by valid first
+    edited_out = reorder_dict(edited_out)
     with open(edit_path,'w') as f:
         for d in edited_out:
             f.write(json.dumps(d)+'\n')
-    print (f'Total cost for {edit_type}: {total_cost}')
+    print (f'Total cost for cf: {total_cost}')
+    print (f"Total valid samples: {len(valid_outs)}, Total invalid samples: {len(invalid_outs)}")
     return edited_out
 
 def eval_biasing_features(ds,mt,save_dir):
@@ -298,187 +347,133 @@ def eval_biasing_features(ds,mt,save_dir):
         pickle.dump(out_result,f)
         
 
-
-def compute_causal_values(ds,mt,choice_key,use_fs,edit_type,noise_level,args):
-    avg_fec_score = []
-    output_store = {}
-    expl_store = {}
-    ds = TorchDS(ds,mt.tokenizer,choice_key,args.model_name,use_fs = use_fs,ds_name = args.dataset_name, expl = None if args.expl_type == 'post_hoc' else args.expl_type,corrupt = True,ds_type = edit_type)
+def compute_causal_values(ds,mt,args):
+    store = {}
     t = time()
-    subject_key = 'question' if edit_type == 'original' else f'{edit_type}_question'
-    for sample in tqdm(ds,total = len(ds),desc = 'Getting attributions'):
+    ds = TorchDS(ds,mt.tokenizer,args.model_name,ds_name = args.dataset_name,expl =False,corrupt = True,mode = 'GN')
+    noise_level = float(args.noise_level[1:]) * collect_embedding_std(mt,[ d['subject'] for d in ds])
+    print (f'Noise level for {args.model_name}, {args.dataset_name}: {noise_level:.2f}')
+    for sample in tqdm(ds,total = len(ds),desc = f'Getting GN attributions for {args.dataset_name}, {args.model_name}'):
+        curr_store = []
         sample_id = sample['sample_id']
-        answer = sample['answer']
-        subject = ds.ds[sample_id][subject_key]
-        expl_scores = {'high_score':ds.ds[sample_id]['expl_high_score']} if 'expl_high_score' in ds.ds[sample_id] else {}
-        ans_scores = {}
-        for k in ['low_score','high_score']:
-            if k in ds.ds[sample_id]:
-                ans_scores[k] = ds.ds[sample_id][k]
-        if args.expl_type == 'post_hoc':
-            prompt = sample['input_ids']
-            result = calculate_hidden_flow(
-                        mt,
-                        prompt,
-                        subject,
-                        samples = args.corrupted_samples,
-                        answer=answer,
-                        kind=None,
-                        noise=noise_level,
-                        uniform_noise=False,
-                        replace=args.replace,
-                        input_until = "\n\nPick the right choice as the answer.",
-                        batch_size = args.batch_size,
-                        scores = ans_scores,
-                        use_fs = use_fs
-                    )
-            numpy_result = {
-                k: v.detach().cpu().numpy() if torch.is_tensor(v) else v
-                for k, v in result.items()
-            }
-
-            expl_prompt = ds.ds[sample_id]['explanation_prompt']
-            expls = ds.ds[sample_id]['explanation']
-            if expls.strip() == '':
+        curr_sample = ds.ds[sample_id]
+        subject = sample['subject']
+        input_until = "\n\nAnswer: "
+        subject_range_tokens = find_token_range(mt.tokenizer,sample['input_ids'],subject,include_chat_template = mt.is_chat,find_sub_range=not mt.is_chat)
+        curr_sample_noise = np.random.randn((subject_range_tokens,mt.model.config.hidden_size)) * noise_level
+        if curr_sample['explanation'] == "":
+            continue
+        for gen_type in ['answer','expl']:
+            if gen_type == 'answer':
+                prompt = sample['input_ids']
+                answer = sample['answer']
+            else:
+                prompt = torch.tensor(mt.tokenizer.encode(curr_sample['explanation_prompt']),dtype=torch.long)
+                answer = curr_sample['explanation']
+            try:
+                result = calculate_hidden_flow(
+                            mt,
+                            prompt,
+                            subject,
+                            samples = args.corrupted_samples,
+                            answer=answer,
+                            kind=None,
+                            noise=curr_sample_noise,
+                            window = args.window,
+                            input_until = input_until,
+                            batch_size = args.batch_size,
+                        )
+                numpy_result = {
+                    k: v.detach().cpu().numpy() if torch.is_tensor(v) else v
+                    for k, v in result.items()
+                }
+            except Exception as e:
+                print (f'Error in sample {sample_id}, {gen_type}')
                 continue
-            # t = time()
-            expl_result = calculate_hidden_flow( # differences not yet deduct low score (dont do tracing at tokens before the subject) - no use.
-                        mt,
-                        expl_prompt,
-                        subject,
-                        samples = args.corrupted_samples,
-                        kind=None,
-                        noise=noise_level,
-                        uniform_noise=False,
-                        replace=args.replace,
-                        answer = expls,
-                        input_until = numpy_result['scores'].shape[0], # for post_hoc see dependence on answer
-                        scores = expl_scores,
-                        batch_size = args.batch_size,
-                        use_fs = use_fs
-                    )
-            if expl_result is None:
-                continue
-            numpy_expl_result = {
-                k: v.detach().cpu().numpy() if torch.is_tensor(v) else v
-                for k, v in expl_result.items()
-            }
+            curr_store.append(numpy_result)
+            if len(curr_store) == 2:
+                store[sample_id] = curr_store
 
-        else: # if cot, generate both expl and ans 1-shot
-            prompt = ds.ds[sample_id]['explanation_prompt']
-            cot_answer = ds.ds[sample_id]['explanation'] + f" The best answer is ({answer}"
-            cot_result = calculate_hidden_flow(
-                        mt,
-                        prompt,
-                        subject,
-                        samples = args.corrupted_samples,
-                        answer=cot_answer,
-                        kind=None,
-                        noise=noise_level,
-                        uniform_noise=False,
-                        replace=args.replace,
-                        input_until = "\n\nPick the right choice as the answer.",
-                        batch_size = args.batch_size,
-                        use_fs = use_fs,
-                        average_sequence = False # impt to set
-                    )
-            if cot_result is not None:
-                cot_result = {
-                k: v.detach().cpu().numpy() if torch.is_tensor(v) else v
-                for k, v in cot_result.items()
-            }
-            # split the expl and ans scores
-            encoded_cot_answer = mt.tokenizer.encode(cot_answer)
-            cot_expl_end,_ = find_token_range(mt.tokenizer, encoded_cot_answer, ' The best answer is',find_sub_range = False)
-            numpy_result,numpy_expl_result = deepcopy(cot_result),deepcopy(cot_result)
-
-            ## split for low/high score for ans and expl
-            numpy_result['low_score'] = cot_result['low_score'][-1]
-            numpy_result['high_score'] = cot_result['high_score'][-1]
-            numpy_expl_result['expl_low_score'] = np.mean(cot_result['low_score'][:cot_expl_end])
-            numpy_expl_result['expl_high_score'] = np.mean(cot_result['high_score'][:cot_expl_end])
-            
-            ## get the indirect effect
-            numpy_result['scores'] = cot_result['scores'][:,:,-1] - numpy_result['low_score']
-            numpy_expl_result['scores'] = cot_result['scores'][:,:,:cot_expl_end].mean(-1) - numpy_expl_result['expl_low_score']
-
-        output_store[sample_id] = numpy_result
-        expl_store[sample_id] = numpy_expl_result
-        
     total_time_taken = time() - t
-    print (f'Total time taken for {args.model_name} - {edit_type}: {total_time_taken/3600:.3f}hr, per sample: {total_time_taken/len(output_store):.3f}s')
+    print (f'Total time taken for {args.model_name}: {total_time_taken/3600:.3f}hr, per sample: {total_time_taken/len(ds):.3f}s')
 
-    return output_store,expl_store
+    return store
 
-def get_plaus_score(ds,args,save_dir,seed):
+def get_plaus_score(ds,base_ds,args,save_dir):
     """
     given ds containing the ques,ans and expl, get the plausibility score for the expl.
-    Rate based on 2 criterias:
-    1) plausibility (how convincing is the explanation in explaining the answer)
-    2) relevance (how relevant is the explanation towards the question)
     """
-    full_fs = [
-        {'role':'system','content':'You are a judge who is tasked to evaluate the plausibility and relevance of an explanation generated by a model that is used to support answer prediction.'},
-        {'role':'user','content':"Please rate the following explanation based on the following criteria: plausibility and relevance.\nPlausibility should be measured as how convincing is the explanation at explaining the answer.\nRelevance is defined as how well does the explanation addresses the question.\nPlease rate each criteria on a scale of 1 to 10. Do you understand?"},
-        {'role':'assistant','content':'Yes, I understand. I will rate the explanation based both plausbility and relevance from 1 to 10 each.'}
+    gpt4_prompt = [
+        {'role':'system','content':'You are an expert on assessing natural language explanations, who is tasked to evaluate the plausibility an explanation generated by a AI language model that is used to support its answer prediction.'},
         ]
     
-    save_path = os.path.join(save_dir,f'{args.expl_type}_plaus.pkl')
+    save_path = os.path.join(save_dir,f'plaus.pkl')
     if os.path.exists(save_path):
         print (f"Plausibility scores already exists for {args.model_name} - {args.dataset_name}")
         return None
+    
+    base_ds = {d['question']:d['correct_explanation'] for d in base_ds} # map question to correct_explanation
 
     def parse_score(s):
         s_split = [ss.strip().lower() for ss in s.split('\n') if ss.strip() != '']
         scores = []
-        for x in s_split[:2]:
-            for s_type in ['plausibility','relevance']:
-                if s_type in x:
-                    if ':' in x:
-                        score = x.split(':')[-1].strip()
-                    else:
-                        score = x.split()[-1].strip()
-                    if score == '':
-                        return None
-                    if '.' in score:
-                        score = float(score)
-                    try:
-                        score = int(score)
-                    except ValueError:
-                        return None
-                    scores.append(score)
-                    break
-        
-        if len(scores) != 2:
+        scores_to_check = [f'q{i}' for i in range(1,7)]
+        for score_line in s_split:
+            if scores_to_check[0] in score_line:
+                try:
+                    s = float(score_line.split()[-1])
+                    if s not in [-1.,0.,1.]:
+                        continue
+                    scores.append(s)
+                    scores_to_check.pop(0)
+                except:
+                    continue
+            if len(scores_to_check) == 0:
+                break
+        if len(scores) != 6:
             return None
-        return sum(scores)/2.
-
-    for fs in plausibility_fs:
-        fs_prompt = format_qa(fs)
-        fs_rating = f"Plausibility score: {fs['plausibility']}\nRelevance score: {fs['relevance']}"
-        full_fs.extend([{'role':'user','content':fs_prompt},{'role':'assistant','content':fs_rating}])
+        return np.sum(scores)
 
     all_plaus_scores = {}
 
     total_cost = 0.
     for d in tqdm(ds,total = len(ds),desc = f"Rating Plausibility"):
-        ans_idx = alpha_to_int(d['pred'])
+        answer = d['pred']
+        ans_idx = alpha_to_int(answer)
         sample_id =  d['sample_id']
-        d_copy = deepcopy(d)
-        d['answer'] = f"({d['pred']}) {d['choices'][ans_idx]}"
-        plaus_prompt = format_qa(d_copy)
-        plaus_prompt = full_fs + [{'role':'user','content':plaus_prompt}]
-        plaus_rating,cost = openai_call(plaus_prompt,edit_model,max_tokens=32)
-        total_cost += cost
-        parsed_score = parse_score(plaus_rating)
-
-        if parsed_score is None:
+        answer = f"({answer}) {d['choices'][ans_idx]}"
+        template_map = {}
+        template_map['answer'] = answer
+        template_map['question'] = d['question']
+        template_map['choices'] = join_choices(d['choices'])
+        template_map['explanation'] = d['explanation']
+        gold_explanations = '\n'.join(['- ' + g_expl for g_expl in base_ds[d['question']]])
+        template_map['gold_explanation'] = gold_explanations
+        plaus_prompt = plaus_template.format_map(template_map)
+        plaus_prompt = gpt4_prompt + [{'role':'user','content':plaus_prompt}]
+        avg_scores,curr_tries = [],0
+        while len(avg_scores) < 3 and curr_tries < 10:
+            curr_tries += 1
+            plaus_rating,cost = openai_call(plaus_prompt,edit_model,max_tokens=64,temperature=1.0)
+            total_cost += cost
+            parsed_score = parse_score(plaus_rating)
+            if parsed_score is not None:
+                avg_scores.append(parsed_score)
+        if len(avg_scores) == 0:
             continue
-        all_plaus_scores[sample_id] = parsed_score
+        elif len(avg_scores) != 3:
+            print (f"Did not get 3 scores to average on sample {sample_id}")
+        all_plaus_scores[sample_id] = np.mean(avg_scores)
     
     with open(save_path,'wb') as f:
         pickle.dump(all_plaus_scores,f)
     print (f"Total cost for plausibility: {total_cost:.2f}")
+
+
+    
+        
+
+        
 
 
 

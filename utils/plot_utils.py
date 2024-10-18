@@ -6,44 +6,46 @@ from scipy import spatial
 from scipy.stats import rankdata
 
 
-def plot_trace_heatmap(result, savepdf=None, title=None, xlabel=None, modelname=None):
-    differences = result["scores"]
-    low_score = result["low_score"]
+def plot_trace_heatmap(result, savepdf=None,xlabel=None,type_ = 'diff_logit'):
+    score = result[type_]
     answer = result["answer"]
-    window = result.get("window", 10)
-    labels = list(result["input_tokens"])
-    for i in range(*result["subject_range"]): # annotate the corrupted tokens
+    ori_input = result["input_tokens"][0]
+    cf_input = result["input_tokens"][1]
+    ori_range = [0,result["subject_range"][0][1]-result["subject_range"][0][0]]
+    cf_range = [0,result["subject_range"][1][1]-result["subject_range"][1][0]]
+    labels = list(ori_input)
+    for i in range(*ori_range): # annotate the corrupted tokens
         labels[i] = labels[i] + "*"
+
+    original_subject_tokens = [ori_input[i] for i in range(*ori_range)]
+    corrupted_subject_tokens = [cf_input[i] for i in range(*cf_range)]
+
+    # title_msg = "\n".join([f"Original tokens: {original_subject_tokens}", f"Corrupted tokens: {corrupted_subject_tokens}"])
     
     # Wrap the labels if they are too long
     max_label_length = 5  # Set your desired maximum label length
-    wrapped_answer = "\n".join(textwrap.wrap(str(answer), width=50))
+    wrapped_answer = "\n".join(textwrap.wrap(str(answer), width=200))
 
     with plt.rc_context(rc={"font.size": 8}):
         fig, ax = plt.subplots(figsize=(14,8), dpi=200)
         h = ax.pcolor(
-            differences,
+            score,
             cmap="Purples",
             vmin=0., 
         )
         ax.invert_yaxis()
-        ax.set_yticks([0.5 + i for i in range(len(differences))])
-        ax.set_xticks([0.5 + i for i in range(0, differences.shape[1] - 6, 5)])
-        ax.set_xticklabels(list(range(0, differences.shape[1] - 6, 5)),fontsize = 14)
+        ax.set_yticks([0.5 + i for i in range(len(score))])
+        ax.set_xticks([0.5 + i for i in range(0, score.shape[1] - 6, 5)])
+        ax.set_xticklabels(list(range(0, score.shape[1] - 6, 5)),fontsize = 14)
         ax.set_yticklabels(labels,fontsize = 14)
         # Adjust tick parameters for better display
         ax.tick_params(axis='y', which='major', labelsize=14, labelrotation=0)
-        if not modelname:
-            modelname = "GPT"
-        ax.set_xlabel(f"single restored layer",fontsize = 16)
+        # ax.set_xlabel(f"single restored layer",fontsize = 16)
         # cb = plt.colorbar(h)
-        if title is not None:
-            ax.set_title(title)
+        # ax.set_title(title_msg)
         if xlabel is not None:
             ax.set_xlabel(xlabel,fontsize = 16)
-        # elif answer is not None:
-            # The following should be cb.ax.set_xlabel, but this is broken in matplotlib 3.5.1.
-            # cb.ax.set_title(f"p({wrapped_answer.strip()})", y=-0.16, fontsize=10)
+        # cb.ax.set_title('gen: '+wrapped_answer, y=-0.16, fontsize=14)
         if savepdf:
             os.makedirs(os.path.dirname(savepdf), exist_ok=True)
             plt.savefig(savepdf, bbox_inches="tight")
@@ -89,15 +91,15 @@ def average_value_via_indices(array,indices_ranges,axis = 0):
             out.append(np.mean([array[:,i] for i in range(*ir)],axis = 1))
     return out
 
-def plot_trace_barplot_joined(output_result,expl_result,answer_range,save_path= None,type_ = 'layer'):
+def plot_trace_barplot_joined(output_result,expl_result,answer_range,save_path= None,type_ = 'layer',value_type = 'logit'):
     """
     scores are of N,L (N - number of tokens, L - number of layers)
     if layer, average across tokens and vice versa
     """
-    o_score = output_result['scores']
+    o_score = output_result[f'diff_{value_type}']
     answer = output_result['answer']
 
-    e_score = expl_result['scores'][:o_score.shape[0]]
+    e_score = expl_result['scores']
     expl = expl_result['answer']
 
     if type_ == 'layer': # we plot out line plot on both the subject and answer.
@@ -206,4 +208,23 @@ def plot_overall_layer(o_list=[],expl_list=[],answer_ranges=[],save_path = None)
     plt.tight_layout()
     plt.savefig(save_path)
     plt.close()
-            
+
+
+def plot_category_barplot(categories,values,save_path,colors = None,legend_loc = 'upper center'):
+    x = np.arange(len(categories))
+    bar_width = 0.25
+    fig, ax = plt.subplots()
+    for i,(label_name,scores) in enumerate(values.items()):
+        if not isinstance(scores[0],list) and not isinstance(scores[0],tuple):
+            ax.bar(x+i*bar_width + (bar_width * (len(scores)-1)/ 2),scores,width = bar_width,label = label_name,color = colors[i])
+        else:
+            primary_scores = [s[0] for s in scores]
+            secondary_scores = [s[1] for s in scores]
+            ax.bar(x+i*bar_width + (bar_width * (len(scores)-1)/ 2),primary_scores,width = bar_width,label = label_name,color = colors[i])
+            ax.bar(x+i*bar_width + (bar_width * (len(scores)-1)/ 2), secondary_scores, width=bar_width,color=colors[i], hatch='//', alpha=0.5)
+
+    ax.set_xticks(x + bar_width)
+    ax.tick_params(axis='y', labelsize=16)
+    ax.set_xticklabels(categories, fontsize=16)
+    ax.legend(loc = legend_loc,fontsize=10)
+    plt.savefig(save_path)

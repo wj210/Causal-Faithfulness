@@ -22,7 +22,7 @@ def get_shap_values(x, y,explainer):
 
 def cc_shap_score(ratios_prediction, ratios_explanation):
     cosine = spatial.distance.cosine(ratios_prediction, ratios_explanation)
-    return cosine
+    return cosine, True if not (np.linalg.norm(ratios_prediction) < 1e-8 or np.linalg.norm(ratios_explanation) < 1e-8) else False
 
 
 def aggregate_values_explanation(shap_value, tokenizer,to_marginalize =' Yes. Why?'):
@@ -39,68 +39,47 @@ def aggregate_values_explanation(shap_value, tokenizer,to_marginalize =' Yes. Wh
 def compute_cc_shap(tokenizer,values_prediction, values_explanation, marg_pred='', marg_expl=' Yes. Why?'):
     ratios_prediction = aggregate_values_explanation(values_prediction,tokenizer,marg_pred)
     ratios_explanation = aggregate_values_explanation(values_explanation,tokenizer,marg_expl)
-    cosine = cc_shap_score(ratios_prediction,ratios_explanation)
-
-    return cosine
+    return cc_shap_score(ratios_prediction,ratios_explanation)
 # , dist_correl, mse, var, kl_div, js_div,
 
-def cc_shap_measure(tokenizer,explainer,output_args,is_chat,expl_type='post_hoc'):
+def cc_shap_measure(tokenizer,explainer,output_args,is_chat,batch_size,answer_only=False):
     """
     We use the already computed explanation and answer to derive the SHAP values for output and expl separately.
-    For both post-hoc and cot, the output is the same, but explanation is sampled. Thus the variance lies with the different generated explanation.
-    In particular, how each explanation's divg against the output varies among each other.
     """
     question = output_args['question']
     choices = output_args['choices']
     ans = output_args['answer']
-    expl = output_args['explanation']
-    if expl_type == 'post_hoc':
-        output_prompt = format_mcq(question,choices,expl_=None,is_chat=is_chat)
-        if is_chat:
-            output_prompt = format_input(output_prompt,tokenizer)
-            output_prompt += "The best answer is: ("
-        output_shap = explainer([output_prompt],[ans]).values[0]
+    expl = output_args.get('explanation','')
+    output_prompt = format_mcq(question,choices,expl_=False,is_chat=is_chat)
+    if is_chat:
+        output_prompt = format_input(output_prompt,tokenizer)
+        output_prompt += "The best answer is: ("
+    marg_pred = output_prompt.split('\n\nAnswer:')[0]
+    output_shap = explainer([output_prompt],[ans],batch_size = batch_size).values[0]
+    if answer_only:
+        shap_agg =  aggregate_values_explanation(output_shap,tokenizer,marg_pred)
+        sub_position = find_token_range(tokenizer,tokenizer.encode(marg_pred,add_special_tokens=False),output_args['subject'],include_chat_template=is_chat)
+        return shap_agg,sub_position
 
-        expl_prompt= format_mcq(question,choices,answer = ans,expl_='post_hoc',is_chat=is_chat)
-        if is_chat:
-            expl_prompt = format_input(expl_prompt,tokenizer) + 'Because' 
-        else:
-            expl_prompt = expl_prompt + '\nBecause' 
-        expl_shap = explainer([expl_prompt],[expl]).values[0]
-        
-    elif expl_type == 'cot':
-        output_prompt = format_mcq(question,choices,expl_='cot',is_chat=is_chat)
-        if is_chat:
-            output_prompt = format_input(output_prompt,tokenizer) + "Let's think step by step: " 
-        else:
-            output_prompt = output_prompt + "\nLet's think step by step: "
-        
-        cot_seq = expl + f" The best answer is ({ans})."
-        cot_values = explainer([output_prompt],[cot_seq]).values[0]
-        ## split up the output_shap and expl_shap
-        key_to_find = 'The best answer is ('
-        encoded_cot_seq = tokenizer.encode(cot_seq)
-        expl_loc,ans_loc = find_token_range(tokenizer,encoded_cot_seq,key_to_find)
-        output_shap = cot_values[:,ans_loc].reshape(-1,1)
-        expl_shap = cot_values[:,:expl_loc]
-
+    expl_prompt= format_mcq(question,choices,answer = ans,expl_=True,is_chat=is_chat)
+    if is_chat:
+        expl_prompt = format_input(expl_prompt,tokenizer) + 'Because' 
     else:
-        raise ValueError(f'Unknown explanation type {expl_type}')
+        expl_prompt = expl_prompt + ' Because' 
+    expl_shap = explainer([expl_prompt],[expl],batch_size = batch_size).values[0]
+     
 
-    marg_pred = output_prompt.split('\n\nPick the right choice as the answer.')[0] 
+    cosine,valid = compute_cc_shap(tokenizer,output_shap, expl_shap, marg_pred=marg_pred, marg_expl=marg_pred)
+    return 1. - cosine ,valid
 
-    cosine = compute_cc_shap(tokenizer,output_shap, expl_shap, marg_pred=marg_pred, marg_expl=marg_pred)
-    return 1. - cosine 
-
-def run_cc_shap(mt,ds,choice_key,args,pred_dir):
-    save_path = os.path.join(pred_dir,f'{args.expl_type}_ccshap.pkl')
+def run_cc_shap(mt,ds,args,pred_dir):
+    save_path = os.path.join(pred_dir,f'ccshap.pkl') if not args.ood_analysis else os.path.join(pred_dir,f'ccshap_ood.pkl')
     mt.model.generation_config.is_decoder = True
     mt.model.config.is_decoder = True
 
     if not os.path.exists(save_path):
         generate_test = True
         out =  {}
-        existing_ids = {}
     else:
         with open(save_path,'rb') as f:
             out = pickle.load(f)
@@ -110,25 +89,42 @@ def run_cc_shap(mt,ds,choice_key,args,pred_dir):
             generate_test = True
         else:
             generate_test = False
-            print (f'Already computed {save_path}')
+            exit (f'Already computed {save_path}')
 
     if generate_test:
-        teacher_forcing_model = shap.models.TeacherForcing(mt.model, mt.tokenizer)
+        teacher_forcing_model = shap.models.TeacherForcing(mt.model, mt.tokenizer,batch_size = 512)
         masker = shap.maskers.Text(mt.tokenizer, mask_token="...", collapse_mask_token=True)
         explainer = shap.Explainer(teacher_forcing_model, masker,silent=True)
-        
-        for d in tqdm(ds,total = len(ds),desc = f'Running CC-SHAP for {args.model_name} using {args.expl_type}'):
+        # for batch_id in tqdm()
+        for d in tqdm(ds,total = len(ds),desc = f'Running CC-SHAP for {args.model_name}'):
             sample_id = d['sample_id']
             output_args = {}
-            output_args['question'] = d['question']
-            output_args['choices'] = join_choices(untuple_dict(d['choices'],choice_key))
-            output_args['answer'] = d['pred']
-            output_args['explanation'] = d['explanation']
-            
-            cos_similarity = cc_shap_measure(mt.tokenizer,explainer,output_args,is_chat=True if 'chat' in args.model_name else False,expl_type=args.expl_type)
-            if cos_similarity is not None:
-                out[sample_id] = cos_similarity
-        
+            output_args['choices'] = join_choices(d['choices'])
+
+            if not args.ood_analysis:
+                output_args['answer'] = d['pred']
+                output_args['question'] = d['question']
+                output_args['explanation'] = d['explanation']
+                if d['explanation'] == "":
+                    continue
+                cos_similarity = cc_shap_measure(mt.tokenizer,explainer,output_args,is_chat=mt.is_chat,batch_size = args.batch_size)
+                if cos_similarity is not None:
+                    out[sample_id] = cos_similarity # add a valid check here
+            else:
+                ood_sample = {}
+                for d_type in ['original','cf']:
+                    if d_type == 'original':
+                        output_args['question'] = d['question']
+                        output_args['answer'] = d['answer']
+                        output_args['subject'] = d['subject']
+                    else:
+                        output_args['question'] = d['cf_question']
+                        output_args['answer'] = d['cf_answer']
+                        output_args['subject'] = d['cf_subject']
+                    cos_similarity = cc_shap_measure(mt.tokenizer,explainer,output_args,is_chat=mt.is_chat,batch_size = args.batch_size,answer_only=True)
+                    ood_sample[d_type] = cos_similarity
+                out[sample_id] = ood_sample
+
         with open(save_path,'wb') as f:
             pickle.dump(out,f)
 
