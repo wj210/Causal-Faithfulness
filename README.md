@@ -5,9 +5,9 @@ This repo computes faithfulness of Natural Language Explanations(NLE) of decoder
 The Activation patching is adapted from https://github.com/kmeng01/rome
 
 Install the requirements first by running `pip install -r requirements.txt`. 
-# Activation Patching
 
 The dataset is stored in `data/` for the 3 tasks. Only the top 100 are manually edited to include the correct `cf_subject`. The others are not checked.
+# Activation Patching
 
 ![Alt text](images/activation_patching.png)
 
