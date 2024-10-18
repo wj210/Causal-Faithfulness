@@ -7,6 +7,8 @@ The Activation patching is adapted from https://github.com/kmeng01/rome
 Install the requirements first by running `pip install -r requirements.txt`. 
 # Activation Patching
 
+The dataset is stored in `data/` for the 3 tasks. Only the top 100 are manually edited to include the correct `cf_subject`. The others are not checked.
+
 ![Alt text](images/activation_patching.png)
 
 The causal matrix of size T x L where T refers to the input length and L is the number of layers within the model. **Note that T refers to the length from the corrupted position onwards as patching tokens before the corruption is meaningless, will yield 0 indirect effects**
