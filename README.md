@@ -6,7 +6,12 @@ The Activation patching is adapted from https://github.com/kmeng01/rome
 
 Install the requirements first by running `pip install -r requirements.txt`. 
 
-The dataset is stored in `data/` for the 3 tasks. Only the top 100 are manually edited to include the correct `cf_subject`. The others are not checked.
+The dataset is stored in `data/` for the 3 tasks. For CoS-E and esnli, there are only 100 manually edited counterfactuals. While in ComVE it contains much more since there is no need for manual annotation, we just swap the correct sentence in.
+
+e-snli is taken from https://github.com/OanaMariaCamburu/e-SNLI
+
+ComVE from https://github.com/wangcunxiang/SemEval2020-Task4-Commonsense-Validation-and-Explanation, we edit task A, to only present the incorrect statement as the original input and patch in the correct as the counterfactual. The golden explanations are derived from Task C for plausibility scoring.
+
 # Activation Patching
 
 ![Alt text](images/activation_patching.png)
@@ -33,7 +38,7 @@ Run `run_faithfulness.sh` which would run two files: `get_predictions.py` and `m
 
 `get_predictions.py` gets the answer and NLE from the model as well as the low scores (logits and probs) of both answer and NLE. low scores refer to pure corruption without any patching, ie p<sub>*</sub>(y).
 
-`main.py` performs AP over L and T for each sample and stores the values in a file.
+`main.py` performs AP over L and T for each sample and stores the values in a file. You can change the `metric` field to assess different evaluations - from `[cc_shap,cf_edit,plausibility]` Take note to include your `OPENAI_API_KEY` for plausibility.
 
 run `get_score.sh` to compute the values 
 
