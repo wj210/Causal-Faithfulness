@@ -70,7 +70,7 @@ def main():
                 checked_ds,_ = check_subject(ds) # check if subject exist in question
                 checked_ds = filter_samples(checked_ds) # remove questiosn where no of tokens after subject is too little
                 print (f'omitted {len(ds)- len(checked_ds)} samples, left {len(checked_ds)} samples')
-                sorted_ds = sort_by_earliest_subject(checked_ds,tokenizer) # sort by the earliest subject
+                sorted_ds = sort_by_earliest_subject(checked_ds,mt.tokenizer) # sort by the earliest subject
                 cf_ds = paraphrase_instruction(sorted_ds,args,cf_ds_path)
             else:
                 cf_ds = ds
